@@ -22,6 +22,7 @@ declare const PluginAPI: {
   loadSyncedData(key?: string): Promise<string | null>;
   persistDataSynced(dataStr: string, key?: string): Promise<void>;
   onReady?(fn: () => void | Promise<void>): void;
+  showSnack?(opts: { msg: string; type?: 'ERROR' | 'SUCCESS' | 'INFO'; ico?: string }): void;
   log?: {
     debug?: (...args: unknown[]) => void;
   };
@@ -305,6 +306,61 @@ const handleBasecampTimeTrackingTrigger = async (
         hours,
       });
     } catch (error) {
+      const reqError = normalizeRequestError(error);
+      if (reqError.status === 403 || reqError.status === 404) {
+        PluginAPI.showSnack?.({
+          msg: t('ERRORS.TIMESHEET_UNAVAILABLE'),
+          type: 'ERROR',
+          ico: 'error',
+        });
+        
+        // Prevent tight loop repeating by updating the watermark as if it succeeded
+        const key = getWatermarkKey(task.issueProviderId ?? '', task.issueId ?? '', date);
+        const pushedMs = watermarkStore.get(key) ?? 0;
+        watermarkStore.set(key, pushedMs + deltaMs);
+        await saveWatermarks();
+        
+        PluginAPI.log?.debug?.('[basecamp-issue-provider] Timesheet unavailable, dropping time', {
+          taskId: task.id,
+          issueId: task.issueId,
+          date,
+          status: reqError.status,
+        });
+        continue;
+      } else if (reqError.status === 422) {
+        PluginAPI.showSnack?.({
+          msg: t('ERRORS.TIMESHEET_VALIDATION_FAILED'),
+          type: 'ERROR',
+          ico: 'error',
+        });
+        
+        PluginAPI.log?.debug?.('[basecamp-issue-provider] Timesheet validation failed, dropping time', {
+          taskId: task.id,
+          issueId: task.issueId,
+          date,
+          status: reqError.status,
+        });
+        
+        // Do NOT advance the watermark so the delta is preserved and retried later.
+        continue;
+      } else if (reqError.status === 429) {
+        PluginAPI.showSnack?.({
+          msg: t('ERRORS.RATE_LIMITED'),
+          type: 'ERROR',
+          ico: 'error',
+        });
+        
+        PluginAPI.log?.debug?.('[basecamp-issue-provider] Request rate limited by Basecamp, dropping time for now', {
+          taskId: task.id,
+          issueId: task.issueId,
+          date,
+          status: reqError.status,
+        });
+        
+        // Do NOT advance the watermark so the delta is preserved and retried later.
+        continue;
+      }
+      
       // Task 4.x will implement proper failure handling (notifications, etc).
       PluginAPI.log?.debug?.('[basecamp-issue-provider] Time push failed', {
         taskId: task.id,

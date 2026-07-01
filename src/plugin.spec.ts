@@ -9,6 +9,7 @@ let logDebugMock: ReturnType<typeof vi.fn>;
 let getConfigMock: ReturnType<typeof vi.fn>;
 let loadSyncedDataMock: ReturnType<typeof vi.fn>;
 let persistDataSyncedMock: ReturnType<typeof vi.fn>;
+let showSnackMock: ReturnType<typeof vi.fn>;
 let clearTodolistCacheForTests: () => void;
 let postAuthenticatedJsonForTests: <TResponse = unknown>(
   url: string,
@@ -36,6 +37,7 @@ beforeAll(async () => {
   getConfigMock = vi.fn().mockResolvedValue(null);
   loadSyncedDataMock = vi.fn().mockResolvedValue(null);
   persistDataSyncedMock = vi.fn().mockResolvedValue(undefined);
+  showSnackMock = vi.fn();
   (globalThis as any).PluginAPI = {
     registerIssueProvider: vi.fn((def: IssueProviderPluginDefinition) => {
       definition = def;
@@ -48,6 +50,7 @@ beforeAll(async () => {
     getConfig: getConfigMock,
     loadSyncedData: loadSyncedDataMock,
     persistDataSynced: persistDataSyncedMock,
+    showSnack: showSnackMock,
     onReady: vi.fn(),
     log: {
       debug: logDebugMock,
@@ -76,6 +79,7 @@ describe('Basecamp Issue Provider Plugin', () => {
     loadSyncedDataMock.mockResolvedValue(null);
     persistDataSyncedMock.mockReset();
     persistDataSyncedMock.mockResolvedValue(undefined);
+    showSnackMock.mockReset();
     clearTodolistCacheForTests();
     watermarkStoreForTests.clear();
   });
@@ -479,6 +483,96 @@ describe('Basecamp Issue Provider Plugin', () => {
       // Watermark should remain undefined/0
       const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
       expect(watermarkStoreForTests.get(key)).toBeUndefined();
+    });
+
+    it('shows snackbar and updates watermark if POST fails with 403', async () => {
+      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      requestMock.mockRejectedValue(Object.assign(new Error(), { status: 403 }));
+
+      await registeredHooks.currentTaskChange({
+        previous: makeTask(),
+        current: null,
+      });
+
+      expect(showSnackMock).toHaveBeenCalledWith({
+        msg: 'ERRORS.TIMESHEET_UNAVAILABLE',
+        type: 'ERROR',
+        ico: 'error',
+      });
+      const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+      expect(watermarkStoreForTests.get(key)).toBe(5400000);
+      expect(persistDataSyncedMock).toHaveBeenCalledWith(
+        expect.any(String),
+        'basecamp_time_watermarks',
+      );
+    });
+
+    it('shows snackbar and updates watermark if POST fails with 404', async () => {
+      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      requestMock.mockRejectedValue(Object.assign(new Error(), { status: 404 }));
+
+      await registeredHooks.currentTaskChange({
+        previous: makeTask(),
+        current: null,
+      });
+
+      expect(showSnackMock).toHaveBeenCalledWith({
+        msg: 'ERRORS.TIMESHEET_UNAVAILABLE',
+        type: 'ERROR',
+        ico: 'error',
+      });
+      const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+      expect(watermarkStoreForTests.get(key)).toBe(5400000);
+      expect(persistDataSyncedMock).toHaveBeenCalledWith(
+        expect.any(String),
+        'basecamp_time_watermarks',
+      );
+    });
+
+    it('shows snackbar and does not update watermark if POST fails with 422', async () => {
+      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      requestMock.mockRejectedValue(Object.assign(new Error(), { status: 422 }));
+
+      await registeredHooks.currentTaskChange({
+        previous: makeTask(),
+        current: null,
+      });
+
+      expect(showSnackMock).toHaveBeenCalledWith({
+        msg: 'ERRORS.TIMESHEET_VALIDATION_FAILED',
+        type: 'ERROR',
+        ico: 'error',
+      });
+
+      // Watermark should remain undefined/unchanged
+      const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+      expect(watermarkStoreForTests.get(key)).toBeUndefined();
+      
+      // Data should not be persisted since the watermark didn't change
+      expect(persistDataSyncedMock).not.toHaveBeenCalled();
+    });
+
+    it('shows snackbar and does not update watermark if POST fails with 429', async () => {
+      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      requestMock.mockRejectedValue(Object.assign(new Error(), { status: 429 }));
+
+      await registeredHooks.currentTaskChange({
+        previous: makeTask(),
+        current: null,
+      });
+
+      expect(showSnackMock).toHaveBeenCalledWith({
+        msg: 'ERRORS.RATE_LIMITED',
+        type: 'ERROR',
+        ico: 'error',
+      });
+
+      // Watermark should remain undefined/unchanged
+      const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+      expect(watermarkStoreForTests.get(key)).toBeUndefined();
+      
+      // Data should not be persisted since the watermark didn't change
+      expect(persistDataSyncedMock).not.toHaveBeenCalled();
     });
 
     it('skips push if accountId is missing', async () => {

@@ -27,6 +27,9 @@
     "NOT_AUTHENTICATED": "Basecamp: Not authenticated. Please connect your account.",
     "MISSING_ACCOUNTID": "Basecamp: No account selected.",
     "MISSING_BUCKETID": "Basecamp: No project selected.",
-    "MISSING_TODOLISTID": "Basecamp: No to-do list selected."
+    "MISSING_TODOLISTID": "Basecamp: No to-do list selected.",
+    "TIMESHEET_UNAVAILABLE": "Basecamp: Timesheets are unavailable or inaccessible for this project. Time tracking is ignored.",
+    "TIMESHEET_VALIDATION_FAILED": "Basecamp: Timesheet validation or configuration failed. Time tracking is paused until resolved.",
+    "RATE_LIMITED": "Basecamp: Rate limited by the server. Time tracking will be retried later."
   }
 }
