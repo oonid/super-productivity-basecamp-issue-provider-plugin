@@ -499,15 +499,13 @@ describe('Basecamp Issue Provider Plugin', () => {
         type: 'ERROR',
         ico: 'error',
       });
+      // Watermark should remain undefined/unchanged
       const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
-      expect(watermarkStoreForTests.get(key)).toBe(5400000);
-      expect(persistDataSyncedMock).toHaveBeenCalledWith(
-        expect.any(String),
-        'basecamp_time_watermarks',
-      );
+      expect(watermarkStoreForTests.get(key)).toBeUndefined();
+      expect(persistDataSyncedMock).not.toHaveBeenCalled();
     });
 
-    it('shows snackbar and updates watermark if POST fails with 404', async () => {
+    it('shows snackbar and does not update watermark if POST fails with 404', async () => {
       getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
       requestMock.mockRejectedValue(Object.assign(new Error(), { status: 404 }));
 
@@ -521,12 +519,10 @@ describe('Basecamp Issue Provider Plugin', () => {
         type: 'ERROR',
         ico: 'error',
       });
+      // Watermark should remain undefined/unchanged
       const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
-      expect(watermarkStoreForTests.get(key)).toBe(5400000);
-      expect(persistDataSyncedMock).toHaveBeenCalledWith(
-        expect.any(String),
-        'basecamp_time_watermarks',
-      );
+      expect(watermarkStoreForTests.get(key)).toBeUndefined();
+      expect(persistDataSyncedMock).not.toHaveBeenCalled();
     });
 
     it('shows snackbar and does not update watermark if POST fails with 422', async () => {

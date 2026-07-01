@@ -314,13 +314,7 @@ const handleBasecampTimeTrackingTrigger = async (
           ico: 'error',
         });
         
-        // Prevent tight loop repeating by updating the watermark as if it succeeded
-        const key = getWatermarkKey(task.issueProviderId ?? '', task.issueId ?? '', date);
-        const pushedMs = watermarkStore.get(key) ?? 0;
-        watermarkStore.set(key, pushedMs + deltaMs);
-        await saveWatermarks();
-        
-        PluginAPI.log?.debug?.('[basecamp-issue-provider] Timesheet unavailable, dropping time', {
+        PluginAPI.log?.debug?.('[basecamp-issue-provider] Timesheet unavailable (403/404). Leaving watermark unchanged.', {
           taskId: task.id,
           issueId: task.issueId,
           date,
