@@ -11,7 +11,7 @@ import type {
 declare const PluginAPI: {
   registerIssueProvider(definition: IssueProviderPluginDefinition): void;
   registerHook(
-    hook: 'currentTaskChange' | 'taskComplete',
+    hook: 'currentTaskChange' | 'taskComplete' | 'persistedDataChanged',
     handler: (payload: unknown) => void | Promise<void>,
   ): void;
   translate(key: string, params?: Record<string, string | number>): string;
@@ -19,6 +19,9 @@ declare const PluginAPI: {
   getOAuthToken(): Promise<string | null>;
   request<T = unknown>(url: string, options?: PluginRequestOptions): Promise<T>;
   getConfig<T = Record<string, unknown>>(): Promise<T | null>;
+  loadSyncedData(key?: string): Promise<string | null>;
+  persistDataSynced(dataStr: string, key?: string): Promise<void>;
+  onReady?(fn: () => void | Promise<void>): void;
   log?: {
     debug?: (...args: unknown[]) => void;
   };
@@ -35,6 +38,8 @@ const BASECAMP_TODOS_PAGE_CAP = 20;
 const BASECAMP_ISSUE_PROVIDER_KEY = 'plugin:basecamp-issue-provider';
 const HOOK_CURRENT_TASK_CHANGE = 'currentTaskChange';
 const HOOK_TASK_COMPLETE = 'taskComplete';
+const WATERMARK_STORAGE_KEY = 'basecamp_time_watermarks';
+const HOOK_PERSISTED_DATA_CHANGED = 'persistedDataChanged';
 // Public OAuth client metadata, injected at build time via esbuild `define` from the
 // BASECAMP_CLIENT_ID / BASECAMP_CLIENT_SECRET build env (see scripts/build.js). Falls back to
 // placeholders so the plugin source carries no real credentials. Users can supply their own
@@ -110,6 +115,63 @@ interface TaskCompletePayload {
   taskId: string;
   task: Task;
 }
+
+interface TimeDelta {
+  date: string;
+  deltaMs: number;
+}
+
+// In-memory watermark store. Key: `${issueProviderId}:${todoId}:${date}` → pushed milliseconds.
+// Task 3.3 will persist this to plugin-managed synced storage.
+const watermarkStore = new Map<string, number>();
+
+let isWatermarksLoaded = false;
+
+const loadWatermarks = async (): Promise<void> => {
+  try {
+    const dataStr = await PluginAPI.loadSyncedData(WATERMARK_STORAGE_KEY);
+    if (dataStr) {
+      const data = JSON.parse(dataStr) as Record<string, number>;
+      watermarkStore.clear();
+      for (const [k, v] of Object.entries(data)) {
+        watermarkStore.set(k, v);
+      }
+    }
+  } catch (error) {
+    PluginAPI.log?.debug?.('[basecamp-issue-provider] Failed to load watermarks', error);
+  }
+};
+
+const saveWatermarks = async (): Promise<void> => {
+  try {
+    const data = Object.fromEntries(watermarkStore.entries());
+    await PluginAPI.persistDataSynced(JSON.stringify(data), WATERMARK_STORAGE_KEY);
+  } catch (error) {
+    PluginAPI.log?.debug?.('[basecamp-issue-provider] Failed to save watermarks', error);
+  }
+};
+
+const getWatermarkKey = (issueProviderId: string, todoId: string, date: string): string =>
+  `${issueProviderId}:${todoId}:${date}`;
+
+const computePositiveDeltas = (
+  timeSpentOnDay: Record<string, number> | undefined,
+  issueProviderId: string,
+  todoId: string,
+): TimeDelta[] => {
+  if (!timeSpentOnDay) return [];
+
+  const deltas: TimeDelta[] = [];
+  for (const [date, trackedMs] of Object.entries(timeSpentOnDay)) {
+    const key = getWatermarkKey(issueProviderId, todoId, date);
+    const pushedMs = watermarkStore.get(key) ?? 0;
+    const deltaMs = trackedMs - pushedMs;
+    if (deltaMs > 0) {
+      deltas.push({ date, deltaMs });
+    }
+  }
+  return deltas;
+};
 
 const t = (key: string): string => {
   try {
@@ -188,6 +250,11 @@ const handleBasecampTimeTrackingTrigger = async (
   trigger: BasecampTimeTrackingTrigger,
   task: Task | null | undefined,
 ): Promise<void> => {
+  if (!isWatermarksLoaded) {
+    await loadWatermarks();
+    isWatermarksLoaded = true;
+  }
+
   if (!isBasecampLinkedTask(task)) {
     return;
   }
@@ -199,23 +266,74 @@ const handleBasecampTimeTrackingTrigger = async (
     return;
   }
 
-  // Later tasks replace this boundary with delta calculation and timesheet POSTing.
-  PluginAPI.log?.debug?.('[basecamp-issue-provider] Time tracking push eligible', {
-    trigger,
-    mode,
-    taskId: task.id,
-    issueId: task.issueId,
-  });
+  const deltas = computePositiveDeltas(
+    task.timeSpentOnDay,
+    task.issueProviderId ?? '',
+    task.issueId ?? '',
+  );
+
+  if (deltas.length === 0) {
+    return;
+  }
+
+  if (!config.accountId) {
+    PluginAPI.log?.debug?.('[basecamp-issue-provider] Skipping time push: no accountId');
+    return;
+  }
+
+  for (const { date, deltaMs } of deltas) {
+    const hours = (deltaMs / 3600000).toFixed(2);
+    const url = getAccountScopedUrl(
+      config.accountId,
+      `/recordings/${task.issueId}/timesheet/entries.json`,
+    );
+
+    try {
+      await postAuthenticatedJson(url, { date, hours });
+
+      // Only update watermark after successful POST (which implies 201 Created from Basecamp)
+      const key = getWatermarkKey(task.issueProviderId ?? '', task.issueId ?? '', date);
+      const pushedMs = watermarkStore.get(key) ?? 0;
+      watermarkStore.set(key, pushedMs + deltaMs);
+      await saveWatermarks();
+
+      PluginAPI.log?.debug?.('[basecamp-issue-provider] Time pushed successfully', {
+        taskId: task.id,
+        issueId: task.issueId,
+        date,
+        deltaMs,
+        hours,
+      });
+    } catch (error) {
+      // Task 4.x will implement proper failure handling (notifications, etc).
+      PluginAPI.log?.debug?.('[basecamp-issue-provider] Time push failed', {
+        taskId: task.id,
+        issueId: task.issueId,
+        date,
+        error,
+      });
+    }
+  }
 };
+
+PluginAPI.onReady?.(async () => {
+  await loadWatermarks();
+  isWatermarksLoaded = true;
+});
+
+PluginAPI.registerHook(HOOK_PERSISTED_DATA_CHANGED, async () => {
+  await loadWatermarks();
+  isWatermarksLoaded = true;
+});
 
 PluginAPI.registerHook(HOOK_CURRENT_TASK_CHANGE, (payload: unknown) => {
   const { previous } = payload as CurrentTaskChangePayload;
-  handleBasecampTimeTrackingTrigger('stop', previous);
+  return handleBasecampTimeTrackingTrigger('stop', previous);
 });
 
 PluginAPI.registerHook(HOOK_TASK_COMPLETE, (payload: unknown) => {
   const { task } = payload as TaskCompletePayload;
-  handleBasecampTimeTrackingTrigger('done', task);
+  return handleBasecampTimeTrackingTrigger('done', task);
 });
 
 // Module-level in-memory cache for all-todos fetch with ~30s TTL
@@ -634,4 +752,33 @@ export const __postAuthenticatedJsonForTests = async <TResponse = unknown>(
     return postAuthenticatedJson<TResponse>(url, body);
   }
   throw new Error('Test helper unavailable outside test mode');
+};
+
+export const __watermarkStoreForTests = {
+  get: (key: string): number | undefined => {
+    if (typeof __TEST__ !== 'undefined' && __TEST__) {
+      return watermarkStore.get(key);
+    }
+    throw new Error('Test helper unavailable outside test mode');
+  },
+  set: (key: string, value: number): void => {
+    if (typeof __TEST__ !== 'undefined' && __TEST__) {
+      watermarkStore.set(key, value);
+      return;
+    }
+    throw new Error('Test helper unavailable outside test mode');
+  },
+  clear: (): void => {
+    if (typeof __TEST__ !== 'undefined' && __TEST__) {
+      watermarkStore.clear();
+      return;
+    }
+    throw new Error('Test helper unavailable outside test mode');
+  },
+  getKey: (issueProviderId: string, todoId: string, date: string): string => {
+    if (typeof __TEST__ !== 'undefined' && __TEST__) {
+      return getWatermarkKey(issueProviderId, todoId, date);
+    }
+    throw new Error('Test helper unavailable outside test mode');
+  },
 };
