@@ -3,4 +3,3 @@ dist/
 *.zip
 .env
 .env.*.local
-package-lock.json
