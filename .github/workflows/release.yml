@@ -1,0 +1,87 @@
+name: Release
+
+# Build and publish a GitHub Release when a version tag is pushed.
+#   git tag v1.1.0 && git push origin v1.1.0
+# The tag (minus the leading "v") must match src/manifest.json and package.json.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write # required to create the release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve and verify version
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          MANIFEST_VERSION="$(node -p "require('./src/manifest.json').version")"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "Tag=$GITHUB_REF_NAME  manifest=$MANIFEST_VERSION  package=$PKG_VERSION"
+          if [ "$VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "::error::Tag v$VERSION does not match src/manifest.json version $MANIFEST_VERSION — bump the manifest before tagging."
+            exit 1
+          fi
+          if [ "$VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag v$VERSION does not match package.json version $PKG_VERSION — bump package.json before tagging."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        env:
+          # Optional: bake bring-your-own OAuth credentials into the release. Leave the
+          # repo secrets unset for a BYO-only build (recommended — Launchpad has no PKCE,
+          # so a shipped secret is effectively public). Users supply their own app via the
+          # plugin's advanced oauthOverrides.* config fields.
+          BASECAMP_CLIENT_ID: ${{ secrets.BASECAMP_CLIENT_ID }}
+          BASECAMP_CLIENT_SECRET: ${{ secrets.BASECAMP_CLIENT_SECRET }}
+        run: npm run build
+
+      - name: Package ZIP
+        id: package
+        run: |
+          ASSET="basecamp-issue-provider-v${{ steps.version.outputs.version }}.zip"
+          (cd dist && zip -rq "../$ASSET" .)
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          unzip -l "$ASSET"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.package.outputs.asset }}" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --notes "Basecamp To-dos issue provider — community plugin for Super Productivity.
+
+          **Install:** download the ZIP below, then in Super Productivity go to
+          Settings → Plugins → Load plugin from file and select it. Requires SP ≥ 13.0.0.
+
+          **Bring-your-own OAuth (recommended):** register a Launchpad app at
+          https://launchpad.37signals.com/integrations (redirect URI
+          \`http://127.0.0.1:8976/callback\`) and enter its client id / secret / redirect
+          under the provider's advanced settings. These apply to the desktop app only." \
+            --verify-tag
