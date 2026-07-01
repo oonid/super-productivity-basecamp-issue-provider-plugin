@@ -10,7 +10,10 @@
   "icon": "icon.svg",
   "iFrame": false,
   "permissions": [],
-  "hooks": [],
+  "hooks": [
+    "currentTaskChange",
+    "taskComplete"
+  ],
   "i18n": {
     "languages": [
       "en"

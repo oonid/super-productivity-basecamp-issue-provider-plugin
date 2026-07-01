@@ -1,4 +1,8 @@
-import { IssueProviderManifestConfig, IssueProviderPluginDefinition } from './issue-provider-types';
+import {
+    IssueProviderManifestConfig,
+    IssueProviderPluginDefinition,
+    PluginHttpOptions,
+} from './issue-provider-types';
 export interface PluginMenuEntryCfg {
     pluginId: string;
     label: string;
@@ -427,6 +431,10 @@ export interface PluginAppState {
     }>;
     readonly globalConfig: Readonly<Record<string, unknown>>;
 }
+export interface PluginRequestOptions extends PluginHttpOptions {
+    method?: string;
+    body?: unknown;
+}
 export interface PluginAPI {
     cfg: PluginBaseCfg;
     readonly Hooks: typeof PluginHooks;
@@ -548,6 +556,7 @@ export interface PluginAPI {
     setSecret(key: string, value: string): Promise<void>;
     getSecret(key: string): Promise<string | null>;
     deleteSecret(key: string): Promise<void>;
+    request<T = unknown>(url: string, options?: PluginRequestOptions): Promise<T>;
     downloadFile(filename: string, data: string): Promise<void>;
     executeNodeScript?(request: PluginNodeScriptRequest): Promise<PluginNodeScriptResult>;
     dispatchAction(action: {

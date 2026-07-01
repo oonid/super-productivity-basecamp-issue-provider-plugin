@@ -3,14 +3,25 @@ import type {
   OAuthFlowConfig,
   PluginFieldMapping,
   PluginHttp,
+  PluginRequestOptions,
   PluginSearchResult,
+  Task,
 } from '@super-productivity/plugin-api';
 
 declare const PluginAPI: {
   registerIssueProvider(definition: IssueProviderPluginDefinition): void;
+  registerHook(
+    hook: 'currentTaskChange' | 'taskComplete',
+    handler: (payload: unknown) => void | Promise<void>,
+  ): void;
   translate(key: string, params?: Record<string, string | number>): string;
   startOAuthFlow(config: OAuthFlowConfig): Promise<unknown>;
   getOAuthToken(): Promise<string | null>;
+  request<T = unknown>(url: string, options?: PluginRequestOptions): Promise<T>;
+  getConfig<T = Record<string, unknown>>(): Promise<T | null>;
+  log?: {
+    debug?: (...args: unknown[]) => void;
+  };
 };
 
 const BASECAMP_AUTH_URL = 'https://launchpad.37signals.com/authorization/new';
@@ -21,6 +32,9 @@ const BASECAMP_SCOPE = 'full';
 const BASECAMP_REDIRECT_URI = 'http://127.0.0.1:8976/callback';
 const BASECAMP_TODOS_PAGE_SIZE = 50;
 const BASECAMP_TODOS_PAGE_CAP = 20;
+const BASECAMP_ISSUE_PROVIDER_KEY = 'plugin:basecamp-issue-provider';
+const HOOK_CURRENT_TASK_CHANGE = 'currentTaskChange';
+const HOOK_TASK_COMPLETE = 'taskComplete';
 // Public OAuth client metadata, injected at build time via esbuild `define` from the
 // BASECAMP_CLIENT_ID / BASECAMP_CLIENT_SECRET build env (see scripts/build.js). Falls back to
 // placeholders so the plugin source carries no real credentials. Users can supply their own
@@ -76,10 +90,25 @@ interface BasecampTodo {
   created_at?: string;
 }
 
+type BasecampTimeTrackingMode = 'off' | 'onStop' | 'onDone' | 'both';
+
 interface BasecampPluginConfig {
   accountId?: string;
   bucketId?: string;
   todolistId?: string;
+  timeTracking?: BasecampTimeTrackingMode;
+}
+
+type BasecampTimeTrackingTrigger = 'stop' | 'done';
+
+interface CurrentTaskChangePayload {
+  current: Task | null;
+  previous: Task | null;
+}
+
+interface TaskCompletePayload {
+  taskId: string;
+  task: Task;
 }
 
 const t = (key: string): string => {
@@ -137,6 +166,57 @@ const getTodoTitle = (todo: BasecampTodo): string =>
 
 const getTodoStatus = (todo: BasecampTodo): string =>
   todo.completed ? 'completed' : 'active';
+
+const isBasecampLinkedTask = (task: Task | null | undefined): task is Task =>
+  !!task &&
+  task.issueType === BASECAMP_ISSUE_PROVIDER_KEY &&
+  typeof task.issueId === 'string' &&
+  task.issueId.length > 0;
+
+const isTriggerAllowed = (
+  trigger: BasecampTimeTrackingTrigger,
+  mode: BasecampTimeTrackingMode | undefined,
+): boolean => {
+  if (!mode || mode === 'off') return false;
+  if (mode === 'both') return true;
+  if (mode === 'onStop') return trigger === 'stop';
+  if (mode === 'onDone') return trigger === 'done';
+  return false;
+};
+
+const handleBasecampTimeTrackingTrigger = async (
+  trigger: BasecampTimeTrackingTrigger,
+  task: Task | null | undefined,
+): Promise<void> => {
+  if (!isBasecampLinkedTask(task)) {
+    return;
+  }
+
+  const config = await PluginAPI.getConfig<BasecampPluginConfig>();
+  const mode = config?.timeTracking;
+
+  if (!isTriggerAllowed(trigger, mode)) {
+    return;
+  }
+
+  // Later tasks replace this boundary with delta calculation and timesheet POSTing.
+  PluginAPI.log?.debug?.('[basecamp-issue-provider] Time tracking push eligible', {
+    trigger,
+    mode,
+    taskId: task.id,
+    issueId: task.issueId,
+  });
+};
+
+PluginAPI.registerHook(HOOK_CURRENT_TASK_CHANGE, (payload: unknown) => {
+  const { previous } = payload as CurrentTaskChangePayload;
+  handleBasecampTimeTrackingTrigger('stop', previous);
+});
+
+PluginAPI.registerHook(HOOK_TASK_COMPLETE, (payload: unknown) => {
+  const { task } = payload as TaskCompletePayload;
+  handleBasecampTimeTrackingTrigger('done', task);
+});
 
 // Module-level in-memory cache for all-todos fetch with ~30s TTL
 interface CacheEntry {
@@ -294,6 +374,77 @@ const loadBasecampTodolists = async (
   }));
 };
 
+const getAuthenticatedJsonHeaders = async (): Promise<Record<string, string>> => {
+  const token = await PluginAPI.getOAuthToken();
+  if (!token) {
+    throw new Error(t('ERRORS.NOT_AUTHENTICATED'));
+  }
+  return {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/json',
+  };
+};
+
+const normalizeRequestError = (error: unknown): Error & {
+  status?: number;
+  responseBody?: string;
+} => {
+  const normalized = (
+    error instanceof Error ? error : new Error('Host request failed')
+  ) as Error & {
+    status?: number;
+    responseBody?: string;
+  };
+  const status =
+    typeof error === 'object' &&
+    error !== null &&
+    'status' in error &&
+    typeof (error as { status?: unknown }).status === 'number'
+      ? (error as { status: number }).status
+      : undefined;
+  const responseBodySource =
+    typeof error === 'object' && error !== null && 'error' in error
+      ? (error as { error?: unknown }).error
+      : undefined;
+  const responseBody =
+    typeof responseBodySource === 'string'
+      ? responseBodySource
+      : responseBodySource == null
+        ? undefined
+        : JSON.stringify(responseBodySource);
+
+  if (status !== undefined) {
+    normalized.message = `HTTP ${status}`;
+    normalized.status = status;
+  }
+
+  if (responseBody?.trim()) {
+    normalized.responseBody = responseBody;
+  }
+
+  return normalized;
+};
+
+const postAuthenticatedJson = async <TResponse = unknown>(
+  url: string,
+  body: unknown,
+): Promise<TResponse | undefined> => {
+  try {
+    const response = await PluginAPI.request<TResponse | null>(url, {
+      method: 'POST',
+      headers: {
+        ...(await getAuthenticatedJsonHeaders()),
+        'Content-Type': 'application/json',
+      },
+      body,
+    });
+
+    return response ?? undefined;
+  } catch (error) {
+    throw normalizeRequestError(error);
+  }
+};
+
 PluginAPI.registerIssueProvider({
   configFields: [
     {
@@ -363,17 +514,24 @@ PluginAPI.registerIssueProvider({
       showIf: 'bucketId',
       loadOptions: loadBasecampTodolists,
     },
+    {
+      key: 'timeTracking',
+      type: 'select' as const,
+      label: t('CFG.TIME_TRACKING'),
+      description: t('CFG.TIME_TRACKING_DESC'),
+      required: false,
+      advanced: true,
+      options: [
+        { label: t('CFG.TIME_TRACKING_BOTH'), value: 'both' },
+        { label: t('CFG.TIME_TRACKING_ON_STOP'), value: 'onStop' },
+        { label: t('CFG.TIME_TRACKING_ON_DONE'), value: 'onDone' },
+        { label: t('CFG.TIME_TRACKING_OFF'), value: 'off' },
+      ],
+    },
   ],
 
   async getHeaders(_config: Record<string, unknown>): Promise<Record<string, string>> {
-    const token = await PluginAPI.getOAuthToken();
-    if (!token) {
-      throw new Error(t('ERRORS.NOT_AUTHENTICATED'));
-    }
-    return {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
-    };
+    return getAuthenticatedJsonHeaders();
   },
 
   async searchIssues(
@@ -466,4 +624,14 @@ export const __clearTodolistCacheForTests = (): void => {
   if (typeof __TEST__ !== 'undefined' && __TEST__) {
     todolistCache.clear();
   }
+};
+
+export const __postAuthenticatedJsonForTests = async <TResponse = unknown>(
+  url: string,
+  body: unknown,
+): Promise<TResponse | undefined> => {
+  if (typeof __TEST__ !== 'undefined' && __TEST__) {
+    return postAuthenticatedJson<TResponse>(url, body);
+  }
+  throw new Error('Test helper unavailable outside test mode');
 };

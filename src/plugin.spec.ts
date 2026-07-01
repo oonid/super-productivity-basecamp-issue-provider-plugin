@@ -1,9 +1,18 @@
 import { beforeAll, beforeEach, describe, expect, it, vi, afterEach } from 'vitest';
-import type { IssueProviderPluginDefinition } from '@super-productivity/plugin-api';
+import type { IssueProviderPluginDefinition, Task } from '@super-productivity/plugin-api';
 
 let definition: IssueProviderPluginDefinition;
 let getOAuthTokenMock: ReturnType<typeof vi.fn>;
+let requestMock: ReturnType<typeof vi.fn>;
+let registerHookMock: ReturnType<typeof vi.fn>;
+let logDebugMock: ReturnType<typeof vi.fn>;
+let getConfigMock: ReturnType<typeof vi.fn>;
 let clearTodolistCacheForTests: () => void;
+let postAuthenticatedJsonForTests: <TResponse = unknown>(
+  url: string,
+  body: unknown,
+) => Promise<TResponse | undefined>;
+const registeredHooks: Record<string, (payload: unknown) => void | Promise<void>> = {};
 
 const makeHttp = () => ({
   get: vi.fn(),
@@ -16,24 +25,224 @@ const makeHttp = () => ({
 
 beforeAll(async () => {
   getOAuthTokenMock = vi.fn().mockResolvedValue('mock-token');
+  requestMock = vi.fn();
+  registerHookMock = vi.fn((hook: string, handler: (payload: unknown) => void) => {
+    registeredHooks[hook] = handler;
+  });
+  logDebugMock = vi.fn();
+  getConfigMock = vi.fn().mockResolvedValue(null);
   (globalThis as any).PluginAPI = {
     registerIssueProvider: vi.fn((def: IssueProviderPluginDefinition) => {
       definition = def;
     }),
+    registerHook: registerHookMock,
     translate: vi.fn((key: string) => key),
     startOAuthFlow: vi.fn(),
     getOAuthToken: getOAuthTokenMock,
+    request: requestMock,
+    getConfig: getConfigMock,
+    log: {
+      debug: logDebugMock,
+    },
   };
   (globalThis as any).__TEST__ = true;
   const pluginModule = await import('./plugin');
   clearTodolistCacheForTests = pluginModule.__clearTodolistCacheForTests;
+  postAuthenticatedJsonForTests = pluginModule.__postAuthenticatedJsonForTests;
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe('Basecamp Issue Provider Plugin', () => {
   beforeEach(() => {
     getOAuthTokenMock.mockReset();
     getOAuthTokenMock.mockResolvedValue('mock-token');
+    requestMock.mockReset();
+    logDebugMock.mockReset();
+    getConfigMock.mockReset();
+    getConfigMock.mockResolvedValue(null);
     clearTodolistCacheForTests();
+  });
+
+  describe('time tracking hook registration', () => {
+    const makeTask = (overrides: Partial<Task> = {}): Task =>
+      ({
+        id: 'task-1',
+        title: 'Tracked todo',
+        timeEstimate: 0,
+        timeSpent: 0,
+        isDone: false,
+        projectId: 'project-1',
+        tagIds: [],
+        created: 1,
+        subTaskIds: [],
+        issueId: '101',
+        issueType: 'plugin:basecamp-issue-provider',
+        issueProviderId: 'provider-1',
+        ...overrides,
+      }) as Task;
+
+    it('registers task stop and completion hooks', () => {
+      expect(registerHookMock).toHaveBeenCalledWith(
+        'currentTaskChange',
+        expect.any(Function),
+      );
+      expect(registerHookMock).toHaveBeenCalledWith('taskComplete', expect.any(Function));
+      expect(registeredHooks.currentTaskChange).toEqual(expect.any(Function));
+      expect(registeredHooks.taskComplete).toEqual(expect.any(Function));
+    });
+
+    it('triggers time push for stop events when timeTracking is onStop', async () => {
+      getConfigMock.mockResolvedValue({ timeTracking: 'onStop' });
+
+      await registeredHooks.currentTaskChange({
+        previous: makeTask(),
+        current: null,
+      });
+
+      expect(logDebugMock).toHaveBeenCalledWith(
+        '[basecamp-issue-provider] Time tracking push eligible',
+        expect.objectContaining({
+          trigger: 'stop',
+          mode: 'onStop',
+          taskId: 'task-1',
+          issueId: '101',
+        }),
+      );
+    });
+
+    it('triggers time push for done events when timeTracking is onDone', async () => {
+      getConfigMock.mockResolvedValue({ timeTracking: 'onDone' });
+
+      await registeredHooks.taskComplete({
+        taskId: 'task-1',
+        task: makeTask({ isDone: true }),
+      });
+
+      expect(logDebugMock).toHaveBeenCalledWith(
+        '[basecamp-issue-provider] Time tracking push eligible',
+        expect.objectContaining({
+          trigger: 'done',
+          mode: 'onDone',
+          taskId: 'task-1',
+          issueId: '101',
+        }),
+      );
+    });
+
+    it('triggers time push for both stop and done events when timeTracking is both', async () => {
+      getConfigMock.mockResolvedValue({ timeTracking: 'both' });
+
+      await registeredHooks.currentTaskChange({
+        previous: makeTask(),
+        current: null,
+      });
+      await registeredHooks.taskComplete({
+        taskId: 'task-1',
+        task: makeTask({ isDone: true }),
+      });
+
+      expect(logDebugMock).toHaveBeenCalledTimes(2);
+      expect(logDebugMock).toHaveBeenCalledWith(
+        '[basecamp-issue-provider] Time tracking push eligible',
+        expect.objectContaining({ trigger: 'stop', mode: 'both' }),
+      );
+      expect(logDebugMock).toHaveBeenCalledWith(
+        '[basecamp-issue-provider] Time tracking push eligible',
+        expect.objectContaining({ trigger: 'done', mode: 'both' }),
+      );
+    });
+
+    it('skips time push when timeTracking is off', async () => {
+      getConfigMock.mockResolvedValue({ timeTracking: 'off' });
+
+      await registeredHooks.currentTaskChange({
+        previous: makeTask(),
+        current: null,
+      });
+      await registeredHooks.taskComplete({
+        taskId: 'task-1',
+        task: makeTask({ isDone: true }),
+      });
+
+      expect(logDebugMock).not.toHaveBeenCalled();
+    });
+
+    it('skips time push when timeTracking is undefined', async () => {
+      getConfigMock.mockResolvedValue({});
+
+      await registeredHooks.currentTaskChange({
+        previous: makeTask(),
+        current: null,
+      });
+      await registeredHooks.taskComplete({
+        taskId: 'task-1',
+        task: makeTask({ isDone: true }),
+      });
+
+      expect(logDebugMock).not.toHaveBeenCalled();
+    });
+
+    it('skips time push when getConfig returns null', async () => {
+      getConfigMock.mockResolvedValue(null);
+
+      await registeredHooks.currentTaskChange({
+        previous: makeTask(),
+        current: null,
+      });
+      await registeredHooks.taskComplete({
+        taskId: 'task-1',
+        task: makeTask({ isDone: true }),
+      });
+
+      expect(logDebugMock).not.toHaveBeenCalled();
+    });
+
+    it('does not allow done trigger when mode is onStop', async () => {
+      getConfigMock.mockResolvedValue({ timeTracking: 'onStop' });
+
+      await registeredHooks.taskComplete({
+        taskId: 'task-1',
+        task: makeTask({ isDone: true }),
+      });
+
+      expect(logDebugMock).not.toHaveBeenCalled();
+    });
+
+    it('does not allow stop trigger when mode is onDone', async () => {
+      getConfigMock.mockResolvedValue({ timeTracking: 'onDone' });
+
+      await registeredHooks.currentTaskChange({
+        previous: makeTask(),
+        current: null,
+      });
+
+      expect(logDebugMock).not.toHaveBeenCalled();
+    });
+
+    it('ignores hook events for tasks from other issue providers', async () => {
+      getConfigMock.mockResolvedValue({ timeTracking: 'both' });
+
+      await registeredHooks.currentTaskChange({
+        previous: makeTask({
+          issueType: 'plugin:other-provider',
+          issueId: '101',
+        }),
+        current: null,
+      });
+      await registeredHooks.taskComplete({
+        taskId: 'task-2',
+        task: makeTask({
+          id: 'task-2',
+          issueType: 'JIRA',
+          issueId: 'PROJ-1',
+        }),
+      });
+
+      expect(logDebugMock).not.toHaveBeenCalled();
+    });
   });
 
   describe('OAuth config', () => {
@@ -96,6 +305,75 @@ describe('Basecamp Issue Provider Plugin', () => {
     it('throws a clear error when no OAuth token exists', async () => {
       getOAuthTokenMock.mockResolvedValueOnce(null);
       await expect(definition.getHeaders({})).rejects.toThrow('ERRORS.NOT_AUTHENTICATED');
+    });
+  });
+
+  describe('authenticated POST helper', () => {
+    it('posts JSON with Bearer auth and returns parsed JSON', async () => {
+      requestMock.mockResolvedValue({ ok: true, entryId: 123 });
+
+      const response = await postAuthenticatedJsonForTests<{
+        ok: boolean;
+        entryId: number;
+      }>('https://example.test/timesheet/entries.json', {
+        date: '2026-07-01',
+        hours: '1.50',
+      });
+
+      expect(getOAuthTokenMock).toHaveBeenCalledTimes(1);
+      expect(requestMock).toHaveBeenCalledWith(
+        'https://example.test/timesheet/entries.json',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer mock-token',
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: {
+            date: '2026-07-01',
+            hours: '1.50',
+          },
+        },
+      );
+      expect(response).toEqual({ ok: true, entryId: 123 });
+    });
+
+    it('returns undefined for an empty successful response body', async () => {
+      requestMock.mockResolvedValue(null);
+
+      await expect(
+        postAuthenticatedJsonForTests('https://example.test/timesheet/entries.json', {
+          date: '2026-07-01',
+          hours: '0.25',
+        }),
+      ).resolves.toBeUndefined();
+    });
+
+    it('fails before the host request when no OAuth token exists', async () => {
+      getOAuthTokenMock.mockResolvedValueOnce(null);
+
+      await expect(
+        postAuthenticatedJsonForTests('https://example.test/timesheet/entries.json', {}),
+      ).rejects.toThrow('ERRORS.NOT_AUTHENTICATED');
+      expect(requestMock).not.toHaveBeenCalled();
+    });
+
+    it('throws an error carrying the HTTP status for non-2xx responses', async () => {
+      requestMock.mockRejectedValue({
+        status: 422,
+        error: { error: 'validation failed' },
+      });
+
+      await expect(
+        postAuthenticatedJsonForTests('https://example.test/timesheet/entries.json', {
+          hours: '0.00',
+        }),
+      ).rejects.toMatchObject({
+        message: 'HTTP 422',
+        status: 422,
+        responseBody: JSON.stringify({ error: 'validation failed' }),
+      });
     });
   });
 
@@ -256,6 +534,26 @@ describe('Basecamp Issue Provider Plugin', () => {
 
       expect(bucketField.showIf).toBe('accountId');
       expect(todolistField.showIf).toBe('bucketId');
+    });
+
+    it('exposes advanced time-tracking mode selection', () => {
+      const timeTrackingField = definition.configFields.find(
+        (field) => field.key === 'timeTracking',
+      )!;
+
+      expect(timeTrackingField).toMatchObject({
+        type: 'select',
+        label: 'CFG.TIME_TRACKING',
+        description: 'CFG.TIME_TRACKING_DESC',
+        required: false,
+        advanced: true,
+      });
+      expect(timeTrackingField.options).toEqual([
+        { label: 'CFG.TIME_TRACKING_BOTH', value: 'both' },
+        { label: 'CFG.TIME_TRACKING_ON_STOP', value: 'onStop' },
+        { label: 'CFG.TIME_TRACKING_ON_DONE', value: 'onDone' },
+        { label: 'CFG.TIME_TRACKING_OFF', value: 'off' },
+      ]);
     });
   });
 
