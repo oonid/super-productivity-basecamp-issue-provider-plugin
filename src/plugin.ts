@@ -1,0 +1,469 @@
+import type {
+  IssueProviderPluginDefinition,
+  OAuthFlowConfig,
+  PluginFieldMapping,
+  PluginHttp,
+  PluginSearchResult,
+} from '@super-productivity/plugin-api';
+
+declare const PluginAPI: {
+  registerIssueProvider(definition: IssueProviderPluginDefinition): void;
+  translate(key: string, params?: Record<string, string | number>): string;
+  startOAuthFlow(config: OAuthFlowConfig): Promise<unknown>;
+  getOAuthToken(): Promise<string | null>;
+};
+
+const BASECAMP_AUTH_URL = 'https://launchpad.37signals.com/authorization/new';
+const BASECAMP_TOKEN_URL = 'https://launchpad.37signals.com/authorization/token';
+const BASECAMP_AUTHORIZATION_URL = 'https://launchpad.37signals.com/authorization.json';
+const BASECAMP_API_BASE = 'https://3.basecampapi.com';
+const BASECAMP_SCOPE = 'full';
+const BASECAMP_REDIRECT_URI = 'http://127.0.0.1:8976/callback';
+const BASECAMP_TODOS_PAGE_SIZE = 50;
+const BASECAMP_TODOS_PAGE_CAP = 20;
+// Public OAuth client metadata, injected at build time via esbuild `define` from the
+// BASECAMP_CLIENT_ID / BASECAMP_CLIENT_SECRET build env (see scripts/build.js). Falls back to
+// placeholders so the plugin source carries no real credentials. Users can supply their own
+// Basecamp OAuth app via the advanced oauthOverrides.{clientId,clientSecret,redirectUri}
+// config fields below — the host reads bring-your-own credentials from
+// pluginConfig.oauthOverrides (desktop loopback flow only).
+// WARNING: 37signals Launchpad does NOT support PKCE and treats the client secret as a
+// confidential-client credential. A secret shipped in a distributed build is effectively public
+// and should be rotated if leaked. Do not claim RFC-8252 non-confidential protection.
+declare const process: { env: Record<string, string | undefined> };
+const CLIENT_ID = process.env.BASECAMP_CLIENT_ID || 'YOUR_BASECAMP_CLIENT_ID';
+const CLIENT_SECRET = process.env.BASECAMP_CLIENT_SECRET || 'YOUR_BASECAMP_CLIENT_SECRET';
+
+interface BasecampAuthorizationAccount {
+  id: number;
+  name: string;
+  product: string;
+}
+
+interface BasecampAuthorizationResponse {
+  accounts?: BasecampAuthorizationAccount[];
+}
+
+interface BasecampDockEntry {
+  id?: number;
+  title: string;
+  name: string;
+  url?: string;
+  app_url?: string;
+}
+
+interface BasecampProject {
+  id: number;
+  name: string;
+  dock?: BasecampDockEntry[];
+}
+
+interface BasecampTodolist {
+  id: number;
+  title: string;
+  name?: string;
+}
+
+interface BasecampTodo {
+  id: number;
+  content?: string;
+  title?: string;
+  description?: string | null;
+  completed?: boolean;
+  app_url?: string;
+  url?: string;
+  updated_at?: string;
+  created_at?: string;
+}
+
+interface BasecampPluginConfig {
+  accountId?: string;
+  bucketId?: string;
+  todolistId?: string;
+}
+
+const t = (key: string): string => {
+  try {
+    return PluginAPI.translate(key);
+  } catch {
+    return key;
+  }
+};
+
+const getAccountScopedUrl = (accountId: string, path: string): string =>
+  `${BASECAMP_API_BASE}/${accountId}${path}`;
+
+const formatAccountLabel = (account: BasecampAuthorizationAccount): string =>
+  `${account.name} (${account.id})`;
+
+const parseTodosetIdFromUrl = (url?: string): string | null => {
+  if (!url) {
+    return null;
+  }
+  const match = url.match(/\/todosets\/(\d+)(?:\.json)?(?:$|[/?#])/);
+  return match?.[1] ?? null;
+};
+
+const getRequiredConfigValue = (
+  config: Record<string, unknown>,
+  key: keyof BasecampPluginConfig,
+): string => {
+  const value = String(config[key] || '').trim();
+  if (!value) {
+    throw new Error(t(`ERRORS.MISSING_${String(key).toUpperCase()}`));
+  }
+  return value;
+};
+
+const getBasecampTodosUrl = (
+  accountId: string,
+  bucketId: string,
+  todolistId: string,
+  page = 1,
+): string =>
+  `${getAccountScopedUrl(accountId, `/buckets/${bucketId}/todolists/${todolistId}/todos.json`)}?page=${page}`;
+
+const getBasecampTodoLink = (
+  accountId: string,
+  bucketId: string,
+  todoId: string,
+): string => `https://3.basecamp.com/${accountId}/buckets/${bucketId}/todos/${todoId}`;
+
+const getBasecampTodoCompletionUrl = (accountId: string, todoId: string): string =>
+  getAccountScopedUrl(accountId, `/todos/${todoId}/completion.json`);
+
+const getTodoTitle = (todo: BasecampTodo): string =>
+  (todo.content || todo.title || '').trim() || `Todo ${todo.id}`;
+
+const getTodoStatus = (todo: BasecampTodo): string =>
+  todo.completed ? 'completed' : 'active';
+
+// Module-level in-memory cache for all-todos fetch with ~30s TTL
+interface CacheEntry {
+  todos: BasecampTodo[];
+  timestamp: number;
+}
+const TODO_CACHE_TTL_MS = 30000; // 30 seconds
+const todolistCache = new Map<string, CacheEntry>();
+
+const getCacheKey = (accountId: string, bucketId: string, todolistId: string): string =>
+  `${accountId}:${bucketId}:${todolistId}`;
+
+const mapTodoToSearchResult = (todo: BasecampTodo): PluginSearchResult => ({
+  id: String(todo.id),
+  title: getTodoTitle(todo),
+  url: todo.app_url || todo.url,
+  status: getTodoStatus(todo),
+  description: todo.description || undefined,
+  completed: !!todo.completed,
+});
+
+const loadConfiguredTodolistTodos = async (
+  config: Record<string, unknown>,
+  http: PluginHttp,
+): Promise<BasecampTodo[]> => {
+  const accountId = getRequiredConfigValue(config, 'accountId');
+  const bucketId = getRequiredConfigValue(config, 'bucketId');
+  const todolistId = getRequiredConfigValue(config, 'todolistId');
+
+  const cacheKey = getCacheKey(accountId, bucketId, todolistId);
+  const cached = todolistCache.get(cacheKey);
+  const now = Date.now();
+
+  // Return cached todos if still within TTL
+  if (cached && now - cached.timestamp < TODO_CACHE_TTL_MS) {
+    return cached.todos;
+  }
+
+  const todos: BasecampTodo[] = [];
+
+  for (let page = 1; page <= BASECAMP_TODOS_PAGE_CAP; page += 1) {
+    const pageTodos =
+      (await http.get<BasecampTodo[]>(
+        getBasecampTodosUrl(accountId, bucketId, todolistId, page),
+      )) || [];
+
+    if (!pageTodos.length) {
+      break;
+    }
+
+    todos.push(...pageTodos);
+
+    if (pageTodos.length < BASECAMP_TODOS_PAGE_SIZE) {
+      break;
+    }
+
+    if (page === BASECAMP_TODOS_PAGE_CAP) {
+      console.warn(
+        `[basecamp-issue-provider] Todo import capped at ${BASECAMP_TODOS_PAGE_CAP} pages for todolist ${todolistId}`,
+      );
+    }
+  }
+
+  const filteredTodos = todos.filter((todo) => !todo.completed);
+
+  // Store in cache with current timestamp
+  todolistCache.set(cacheKey, { todos: filteredTodos, timestamp: now });
+
+  return filteredTodos;
+};
+
+const filterTodosForSearch = (
+  todos: BasecampTodo[],
+  searchTerm: string,
+): BasecampTodo[] => {
+  const needle = searchTerm.trim().toLowerCase();
+  if (!needle) {
+    return todos;
+  }
+  return todos.filter((todo) => {
+    const haystacks = [todo.content, todo.title, todo.description, todo.app_url, todo.url]
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+      .map((value) => value.toLowerCase());
+    return haystacks.some((value) => value.includes(needle));
+  });
+};
+
+const loadBasecampAccounts = async (
+  config: Record<string, unknown>,
+  http: PluginHttp,
+): Promise<{ label: string; value: string }[]> => {
+  const data = await http.get<BasecampAuthorizationResponse>(BASECAMP_AUTHORIZATION_URL);
+  const accounts = (data?.accounts || [])
+    .filter((account) => account.product === 'bc3')
+    .map((account) => ({
+      label: formatAccountLabel(account),
+      value: String(account.id),
+    }));
+
+  if (accounts.length === 1 && !config['accountId']) {
+    config['accountId'] = accounts[0].value;
+  }
+
+  return accounts;
+};
+
+const loadBasecampProjects = async (
+  config: Record<string, unknown>,
+  http: PluginHttp,
+): Promise<{ label: string; value: string }[]> => {
+  const accountId = String(config['accountId'] || '').trim();
+  if (!accountId) {
+    return [];
+  }
+  const projects = await http.get<BasecampProject[]>(
+    getAccountScopedUrl(accountId, '/projects.json'),
+  );
+  return (projects || []).map((project) => ({
+    label: project.name,
+    value: String(project.id),
+  }));
+};
+
+const loadBasecampTodolists = async (
+  config: Record<string, unknown>,
+  http: PluginHttp,
+): Promise<{ label: string; value: string }[]> => {
+  const accountId = String(config['accountId'] || '').trim();
+  const bucketId = String(config['bucketId'] || '').trim();
+  if (!accountId || !bucketId) {
+    return [];
+  }
+
+  const project = await http.get<BasecampProject>(
+    getAccountScopedUrl(accountId, `/projects/${bucketId}.json`),
+  );
+  const todoset = (project?.dock || []).find((entry) => entry.name === 'todoset');
+  if (!todoset) {
+    return [];
+  }
+  const todosetId =
+    String(todoset.id || '').trim() ||
+    parseTodosetIdFromUrl(todoset.url) ||
+    parseTodosetIdFromUrl(todoset.app_url);
+  if (!todosetId) {
+    return [];
+  }
+
+  const todolists = await http.get<BasecampTodolist[]>(
+    getAccountScopedUrl(accountId, `/todosets/${todosetId}/todolists.json`),
+  );
+  return (todolists || []).map((todolist) => ({
+    label: todolist.title || todolist.name || String(todolist.id),
+    value: String(todolist.id),
+  }));
+};
+
+PluginAPI.registerIssueProvider({
+  configFields: [
+    {
+      key: 'oauth',
+      type: 'oauthButton' as const,
+      label: t('CFG.CONNECT'),
+      description: t('CFG.OAUTH_NOTE'),
+      oauthConfig: {
+        authUrl: BASECAMP_AUTH_URL,
+        tokenUrl: BASECAMP_TOKEN_URL,
+        clientId: CLIENT_ID,
+        clientSecret: CLIENT_SECRET,
+        redirectUri: BASECAMP_REDIRECT_URI,
+        scopes: [BASECAMP_SCOPE],
+        extraAuthParams: {
+          type: 'web_server',
+        },
+      },
+    },
+    {
+      key: 'oauthOverrides.clientId',
+      type: 'input' as const,
+      label: t('CFG.CLIENT_ID'),
+      description: t('CFG.CLIENT_ID_DESC'),
+      required: false,
+      advanced: true,
+    },
+    {
+      key: 'oauthOverrides.clientSecret',
+      type: 'password' as const,
+      label: t('CFG.CLIENT_SECRET'),
+      description: t('CFG.CLIENT_SECRET_DESC'),
+      required: false,
+      advanced: true,
+    },
+    {
+      key: 'oauthOverrides.redirectUri',
+      type: 'input' as const,
+      label: t('CFG.REDIRECT_URI'),
+      description: t('CFG.REDIRECT_URI_DESC'),
+      required: false,
+      advanced: true,
+    },
+    {
+      key: 'accountId',
+      type: 'select' as const,
+      label: t('CFG.ACCOUNT'),
+      required: true,
+      options: [],
+      loadOptions: loadBasecampAccounts,
+    },
+    {
+      key: 'bucketId',
+      type: 'select' as const,
+      label: t('CFG.PROJECT'),
+      required: true,
+      options: [],
+      showIf: 'accountId',
+      loadOptions: loadBasecampProjects,
+    },
+    {
+      key: 'todolistId',
+      type: 'select' as const,
+      label: t('CFG.TODOLIST'),
+      required: true,
+      options: [],
+      showIf: 'bucketId',
+      loadOptions: loadBasecampTodolists,
+    },
+  ],
+
+  async getHeaders(_config: Record<string, unknown>): Promise<Record<string, string>> {
+    const token = await PluginAPI.getOAuthToken();
+    if (!token) {
+      throw new Error(t('ERRORS.NOT_AUTHENTICATED'));
+    }
+    return {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+    };
+  },
+
+  async searchIssues(
+    searchTerm: string,
+    config: Record<string, unknown>,
+    http: PluginHttp,
+  ): Promise<PluginSearchResult[]> {
+    const todos = await loadConfiguredTodolistTodos(config, http);
+    return filterTodosForSearch(todos, searchTerm).map(mapTodoToSearchResult);
+  },
+
+  async getNewIssuesForBacklog(
+    config: Record<string, unknown>,
+    http: PluginHttp,
+  ): Promise<PluginSearchResult[]> {
+    const todos = await loadConfiguredTodolistTodos(config, http);
+    return todos.map(mapTodoToSearchResult);
+  },
+
+  async getById(issueId: string, config: Record<string, unknown>, http: PluginHttp) {
+    const accountId = getRequiredConfigValue(config, 'accountId');
+    const bucketId = getRequiredConfigValue(config, 'bucketId');
+    const todo = await http.get<BasecampTodo>(
+      getAccountScopedUrl(accountId, `/todos/${issueId}.json`),
+    );
+
+    const lastUpdatedSource = todo.updated_at || todo.created_at;
+    return {
+      id: String(todo.id),
+      title: getTodoTitle(todo),
+      body: todo.description || '',
+      url:
+        todo.app_url ||
+        todo.url ||
+        getBasecampTodoLink(accountId, bucketId, String(todo.id)),
+      state: getTodoStatus(todo),
+      completed: !!todo.completed,
+      lastUpdated: lastUpdatedSource ? new Date(lastUpdatedSource).getTime() : undefined,
+    };
+  },
+
+  getIssueLink(issueId: string, config: Record<string, unknown>): string {
+    const accountId = getRequiredConfigValue(config, 'accountId');
+    const bucketId = getRequiredConfigValue(config, 'bucketId');
+    return getBasecampTodoLink(accountId, bucketId, issueId);
+  },
+
+  issueDisplay: [
+    { field: 'title', label: t('DISPLAY.TITLE'), type: 'link', linkField: 'url' },
+    { field: 'state', label: t('DISPLAY.STATUS'), type: 'text' },
+    { field: 'body', label: t('DISPLAY.DESCRIPTION'), type: 'markdown', hideEmpty: true },
+  ],
+
+  fieldMappings: [
+    {
+      taskField: 'isDone',
+      issueField: 'completed',
+      defaultDirection: 'both',
+      toIssueValue: (taskValue: unknown): boolean => !!taskValue,
+      toTaskValue: (issueValue: unknown): boolean => !!issueValue,
+    },
+  ] satisfies PluginFieldMapping[],
+
+  async updateIssue(
+    id: string,
+    changes: Record<string, unknown>,
+    config: Record<string, unknown>,
+    http: PluginHttp,
+  ): Promise<void> {
+    if (!Object.prototype.hasOwnProperty.call(changes, 'completed')) {
+      return;
+    }
+
+    const accountId = getRequiredConfigValue(config, 'accountId');
+    const isCompleted = !!changes['completed'];
+    const completionUrl = getBasecampTodoCompletionUrl(accountId, id);
+
+    if (isCompleted) {
+      await http.post(completionUrl, {});
+      return;
+    }
+
+    await http.delete(completionUrl);
+  },
+});
+
+// Test-only exports for cache management during testing
+declare const __TEST__: boolean;
+export const __clearTodolistCacheForTests = (): void => {
+  if (typeof __TEST__ !== 'undefined' && __TEST__) {
+    todolistCache.clear();
+  }
+};

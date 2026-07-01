@@ -1,0 +1,26 @@
+{
+  "CFG": {
+    "CONNECT": "Connect Basecamp",
+    "ACCOUNT": "Basecamp account",
+    "PROJECT": "Project",
+    "TODOLIST": "To-do list",
+    "OAUTH_NOTE": "OAuth tokens are stored locally on this device by the host app and are not synced.",
+    "CLIENT_ID": "Custom OAuth client ID",
+    "CLIENT_SECRET": "Custom OAuth client secret",
+    "REDIRECT_URI": "Custom redirect URI",
+    "CLIENT_ID_DESC": "Optional. Use your own Launchpad app client ID instead of the bundled Basecamp client.",
+    "CLIENT_SECRET_DESC": "Optional. Use your own Launchpad app public client secret instead of the bundled Basecamp client. Note: this is stored in the provider config and syncs with your other settings (and may be unencrypted on some sync backends), like other provider passwords.",
+    "REDIRECT_URI_DESC": "Optional. Must match a redirect URI registered on your Launchpad app. Defaults to the host loopback callback when left empty."
+  },
+  "DISPLAY": {
+    "TITLE": "Title",
+    "STATUS": "Status",
+    "DESCRIPTION": "Description"
+  },
+  "ERRORS": {
+    "NOT_AUTHENTICATED": "Basecamp: Not authenticated. Please connect your account.",
+    "MISSING_ACCOUNTID": "Basecamp: No account selected.",
+    "MISSING_BUCKETID": "Basecamp: No project selected.",
+    "MISSING_TODOLISTID": "Basecamp: No to-do list selected."
+  }
+}
