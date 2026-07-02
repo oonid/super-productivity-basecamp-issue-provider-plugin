@@ -14,7 +14,6 @@ declare const PluginAPI: {
     hook: 'currentTaskChange' | 'taskComplete' | 'persistedDataChanged',
     handler: (payload: unknown) => void | Promise<void>,
   ): void;
-  translate(key: string, params?: Record<string, string | number>): string;
   startOAuthFlow(config: OAuthFlowConfig): Promise<unknown>;
   getOAuthToken(): Promise<string | null>;
   request<T = unknown>(url: string, options?: PluginRequestOptions): Promise<T>;
@@ -240,12 +239,10 @@ const computePositiveDeltas = (
   return deltas;
 };
 
-const t = (key: string): string => {
-  try {
-    return PluginAPI.translate(key);
-  } catch {
-    return key;
-  }
+const MISSING_ERROR: Record<string, string> = {
+  accountId: 'Basecamp: No account selected.',
+  bucketId: 'Basecamp: No project selected.',
+  todolistId: 'Basecamp: No to-do list selected.',
 };
 
 const getAccountScopedUrl = (accountId: string, path: string): string =>
@@ -268,7 +265,7 @@ const getRequiredConfigValue = (
 ): string => {
   const value = String(config[key] || '').trim();
   if (!value) {
-    throw new Error(t(`ERRORS.MISSING_${String(key).toUpperCase()}`));
+    throw new Error(MISSING_ERROR[key] ?? 'Basecamp: Required configuration missing.');
   }
   return value;
 };
@@ -306,11 +303,11 @@ const isTriggerAllowed = (
   trigger: BasecampTimeTrackingTrigger,
   mode: BasecampTimeTrackingMode | undefined,
 ): boolean => {
-  if (!mode || mode === 'off') return false;
-  if (mode === 'both') return true;
+  if (mode === 'off') return false;
   if (mode === 'onStop') return trigger === 'stop';
   if (mode === 'onDone') return trigger === 'done';
-  return false;
+  // undefined or 'both' => post on both stop and done (default)
+  return true;
 };
 
 const handleBasecampTimeTrackingTrigger = async (
@@ -332,7 +329,13 @@ const handleBasecampTimeTrackingTrigger = async (
   }
 
   const providerCfg = providerConfigStore.get(task.issueId ?? '');
-  const mode = providerCfg?.timeTracking;
+
+  // Skip if no provider config exists for this todo at all
+  if (!providerCfg) {
+    return;
+  }
+
+  const mode = providerCfg.timeTracking;
 
   if (!isTriggerAllowed(trigger, mode)) {
     return;
@@ -391,7 +394,7 @@ const handleBasecampTimeTrackingTrigger = async (
       const reqError = normalizeRequestError(error);
       if (reqError.status === 403 || reqError.status === 404) {
         PluginAPI.showSnack?.({
-          msg: t('ERRORS.TIMESHEET_UNAVAILABLE'),
+          msg: 'Basecamp: Timesheets are unavailable or inaccessible for this project. Time tracking is ignored.',
           type: 'ERROR',
           ico: 'error',
         });
@@ -408,7 +411,7 @@ const handleBasecampTimeTrackingTrigger = async (
         continue;
       } else if (reqError.status === 422) {
         PluginAPI.showSnack?.({
-          msg: t('ERRORS.TIMESHEET_VALIDATION_FAILED'),
+          msg: 'Basecamp: Timesheet validation or configuration failed. Time tracking is paused until resolved.',
           type: 'ERROR',
           ico: 'error',
         });
@@ -427,7 +430,7 @@ const handleBasecampTimeTrackingTrigger = async (
         continue;
       } else if (reqError.status === 429 || reqError.status === 503) {
         PluginAPI.showSnack?.({
-          msg: t('ERRORS.RATE_LIMITED'),
+          msg: 'Basecamp: Rate limited by the server. Time tracking will be retried later.',
           type: 'ERROR',
           ico: 'error',
         });
@@ -640,7 +643,7 @@ const loadBasecampTodolists = async (
 const getAuthenticatedJsonHeaders = async (): Promise<Record<string, string>> => {
   const token = await PluginAPI.getOAuthToken();
   if (!token) {
-    throw new Error(t('ERRORS.NOT_AUTHENTICATED'));
+    throw new Error('Basecamp: Not authenticated. Please connect your account.');
   }
   return {
     Authorization: `Bearer ${token}`,
@@ -713,8 +716,8 @@ PluginAPI.registerIssueProvider({
     {
       key: 'oauth',
       type: 'oauthButton' as const,
-      label: t('CFG.CONNECT'),
-      description: t('CFG.OAUTH_NOTE'),
+      label: 'Connect Basecamp',
+      description: 'OAuth tokens are stored locally on this device by the host app and are not synced.',
       oauthConfig: {
         authUrl: BASECAMP_AUTH_URL,
         tokenUrl: BASECAMP_TOKEN_URL,
@@ -730,31 +733,31 @@ PluginAPI.registerIssueProvider({
     {
       key: 'oauthOverrides.clientId',
       type: 'input' as const,
-      label: t('CFG.CLIENT_ID'),
-      description: t('CFG.CLIENT_ID_DESC'),
+      label: 'Custom OAuth client ID',
+      description: 'Optional. Use your own Launchpad app client ID instead of the bundled Basecamp client.',
       required: false,
       advanced: true,
     },
     {
       key: 'oauthOverrides.clientSecret',
       type: 'password' as const,
-      label: t('CFG.CLIENT_SECRET'),
-      description: t('CFG.CLIENT_SECRET_DESC'),
+      label: 'Custom OAuth client secret',
+      description: 'Optional. Use your own Launchpad app public client secret instead of the bundled Basecamp client. Note: this is stored in the provider config and syncs with your other settings (and may be unencrypted on some sync backends), like other provider passwords.',
       required: false,
       advanced: true,
     },
     {
       key: 'oauthOverrides.redirectUri',
       type: 'input' as const,
-      label: t('CFG.REDIRECT_URI'),
-      description: t('CFG.REDIRECT_URI_DESC'),
+      label: 'Custom redirect URI',
+      description: 'Optional. Must match a redirect URI registered on your Launchpad app. Defaults to the host loopback callback when left empty.',
       required: false,
       advanced: true,
     },
     {
       key: 'accountId',
       type: 'select' as const,
-      label: t('CFG.ACCOUNT'),
+      label: 'Basecamp account',
       required: true,
       options: [],
       loadOptions: loadBasecampAccounts,
@@ -762,7 +765,7 @@ PluginAPI.registerIssueProvider({
     {
       key: 'bucketId',
       type: 'select' as const,
-      label: t('CFG.PROJECT'),
+      label: 'Project',
       required: true,
       options: [],
       showIf: 'accountId',
@@ -771,7 +774,7 @@ PluginAPI.registerIssueProvider({
     {
       key: 'todolistId',
       type: 'select' as const,
-      label: t('CFG.TODOLIST'),
+      label: 'To-do list',
       required: true,
       options: [],
       showIf: 'bucketId',
@@ -780,15 +783,15 @@ PluginAPI.registerIssueProvider({
     {
       key: 'timeTracking',
       type: 'select' as const,
-      label: t('CFG.TIME_TRACKING'),
-      description: t('CFG.TIME_TRACKING_DESC'),
+      label: 'Time tracking',
+      description: 'Controls when Super Productivity tracked time is posted to Basecamp timesheet entries. Defaults to posting on stop and done.',
       required: false,
       advanced: true,
       options: [
-        { label: t('CFG.TIME_TRACKING_BOTH'), value: 'both' },
-        { label: t('CFG.TIME_TRACKING_ON_STOP'), value: 'onStop' },
-        { label: t('CFG.TIME_TRACKING_ON_DONE'), value: 'onDone' },
-        { label: t('CFG.TIME_TRACKING_OFF'), value: 'off' },
+        { label: 'On stop and done', value: 'both' },
+        { label: 'On stop', value: 'onStop' },
+        { label: 'On done', value: 'onDone' },
+        { label: 'Off', value: 'off' },
       ],
     },
   ],
@@ -863,9 +866,9 @@ PluginAPI.registerIssueProvider({
   },
 
   issueDisplay: [
-    { field: 'title', label: t('DISPLAY.TITLE'), type: 'link', linkField: 'url' },
-    { field: 'state', label: t('DISPLAY.STATUS'), type: 'text' },
-    { field: 'body', label: t('DISPLAY.DESCRIPTION'), type: 'markdown', hideEmpty: true },
+    { field: 'title', label: 'Title', type: 'link', linkField: 'url' },
+    { field: 'state', label: 'Status', type: 'text' },
+    { field: 'body', label: 'Description', type: 'markdown', hideEmpty: true },
   ],
 
   fieldMappings: [

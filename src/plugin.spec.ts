@@ -207,8 +207,8 @@ describe('Basecamp Issue Provider Plugin', () => {
       expect(requestMock).not.toHaveBeenCalled();
     });
 
-    it('skips time push when timeTracking is undefined in cached config', async () => {
-      providerConfigStoreForTests.set('101', { accountId: 'acc-123' }); // no timeTracking
+    it('pushes time on both stop and done when timeTracking is undefined in cached config (defaults to both)', async () => {
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123' }); // no timeTracking, defaults to both
       requestMock.mockResolvedValue({ ok: true });
 
       await registeredHooks.currentTaskChange({
@@ -217,11 +217,18 @@ describe('Basecamp Issue Provider Plugin', () => {
       });
       await registeredHooks.taskComplete({
         taskId: 'task-1',
-        task: makeTask({ isDone: true }),
+        task: makeTask({
+          isDone: true,
+          timeSpentOnDay: { '2026-07-01': 7200000 }, // +1 hour for second event
+        }),
       });
 
-      expect(logDebugMock).not.toHaveBeenCalled();
-      expect(requestMock).not.toHaveBeenCalled();
+      expect(logDebugMock).toHaveBeenCalledTimes(2);
+      expect(logDebugMock).toHaveBeenCalledWith(
+        '[basecamp-issue-provider] Time pushed successfully',
+        expect.anything(),
+      );
+      expect(requestMock).toHaveBeenCalledTimes(2);
     });
 
     it('skips time push when no cached provider config for the todo', async () => {
@@ -515,7 +522,7 @@ describe('Basecamp Issue Provider Plugin', () => {
       });
 
       expect(showSnackMock).toHaveBeenCalledWith({
-        msg: 'ERRORS.TIMESHEET_UNAVAILABLE',
+        msg: 'Basecamp: Timesheets are unavailable or inaccessible for this project. Time tracking is ignored.',
         type: 'ERROR',
         ico: 'error',
       });
@@ -535,7 +542,7 @@ describe('Basecamp Issue Provider Plugin', () => {
       });
 
       expect(showSnackMock).toHaveBeenCalledWith({
-        msg: 'ERRORS.TIMESHEET_UNAVAILABLE',
+        msg: 'Basecamp: Timesheets are unavailable or inaccessible for this project. Time tracking is ignored.',
         type: 'ERROR',
         ico: 'error',
       });
@@ -555,7 +562,7 @@ describe('Basecamp Issue Provider Plugin', () => {
       });
 
       expect(showSnackMock).toHaveBeenCalledWith({
-        msg: 'ERRORS.TIMESHEET_VALIDATION_FAILED',
+        msg: 'Basecamp: Timesheet validation or configuration failed. Time tracking is paused until resolved.',
         type: 'ERROR',
         ico: 'error',
       });
@@ -578,7 +585,7 @@ describe('Basecamp Issue Provider Plugin', () => {
       });
 
       expect(showSnackMock).toHaveBeenCalledWith({
-        msg: 'ERRORS.RATE_LIMITED',
+        msg: 'Basecamp: Rate limited by the server. Time tracking will be retried later.',
         type: 'ERROR',
         ico: 'error',
       });
@@ -672,7 +679,7 @@ describe('Basecamp Issue Provider Plugin', () => {
       });
 
       expect(showSnackMock).toHaveBeenCalledWith({
-        msg: 'ERRORS.RATE_LIMITED',
+        msg: 'Basecamp: Rate limited by the server. Time tracking will be retried later.',
         type: 'ERROR',
         ico: 'error',
       });
@@ -745,7 +752,7 @@ describe('Basecamp Issue Provider Plugin', () => {
 
     it('throws a clear error when no OAuth token exists', async () => {
       getOAuthTokenMock.mockResolvedValueOnce(null);
-      await expect(definition.getHeaders({})).rejects.toThrow('ERRORS.NOT_AUTHENTICATED');
+      await expect(definition.getHeaders({})).rejects.toThrow('Basecamp: Not authenticated. Please connect your account.');
     });
   });
 
@@ -796,7 +803,7 @@ describe('Basecamp Issue Provider Plugin', () => {
 
       await expect(
         postAuthenticatedJsonForTests('https://example.test/timesheet/entries.json', {}),
-      ).rejects.toThrow('ERRORS.NOT_AUTHENTICATED');
+      ).rejects.toThrow('Basecamp: Not authenticated. Please connect your account.');
       expect(requestMock).not.toHaveBeenCalled();
     });
 
@@ -984,16 +991,16 @@ describe('Basecamp Issue Provider Plugin', () => {
 
       expect(timeTrackingField).toMatchObject({
         type: 'select',
-        label: 'CFG.TIME_TRACKING',
-        description: 'CFG.TIME_TRACKING_DESC',
+        label: 'Time tracking',
+        description: 'Controls when Super Productivity tracked time is posted to Basecamp timesheet entries. Defaults to posting on stop and done.',
         required: false,
         advanced: true,
       });
       expect(timeTrackingField.options).toEqual([
-        { label: 'CFG.TIME_TRACKING_BOTH', value: 'both' },
-        { label: 'CFG.TIME_TRACKING_ON_STOP', value: 'onStop' },
-        { label: 'CFG.TIME_TRACKING_ON_DONE', value: 'onDone' },
-        { label: 'CFG.TIME_TRACKING_OFF', value: 'off' },
+        { label: 'On stop and done', value: 'both' },
+        { label: 'On stop', value: 'onStop' },
+        { label: 'On done', value: 'onDone' },
+        { label: 'Off', value: 'off' },
       ]);
     });
   });
@@ -1161,7 +1168,7 @@ describe('Basecamp Issue Provider Plugin', () => {
           { bucketId: '42', todolistId: '77' },
           http as any,
         ),
-      ).rejects.toThrow('ERRORS.MISSING_ACCOUNTID');
+      ).rejects.toThrow('Basecamp: No account selected.');
 
       // Missing bucketId
       await expect(
@@ -1170,7 +1177,7 @@ describe('Basecamp Issue Provider Plugin', () => {
           { accountId: '1234567', todolistId: '77' },
           http as any,
         ),
-      ).rejects.toThrow('ERRORS.MISSING_BUCKETID');
+      ).rejects.toThrow('Basecamp: No project selected.');
 
       // Missing todolistId
       await expect(
@@ -1179,7 +1186,7 @@ describe('Basecamp Issue Provider Plugin', () => {
           { accountId: '1234567', bucketId: '42' },
           http as any,
         ),
-      ).rejects.toThrow('ERRORS.MISSING_TODOLISTID');
+      ).rejects.toThrow('Basecamp: No to-do list selected.');
     });
   });
 
