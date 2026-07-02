@@ -6,7 +6,6 @@ let getOAuthTokenMock: ReturnType<typeof vi.fn>;
 let requestMock: ReturnType<typeof vi.fn>;
 let registerHookMock: ReturnType<typeof vi.fn>;
 let logDebugMock: ReturnType<typeof vi.fn>;
-let getConfigMock: ReturnType<typeof vi.fn>;
 let loadSyncedDataMock: ReturnType<typeof vi.fn>;
 let persistDataSyncedMock: ReturnType<typeof vi.fn>;
 let showSnackMock: ReturnType<typeof vi.fn>;
@@ -16,6 +15,7 @@ let postAuthenticatedJsonForTests: <TResponse = unknown>(
   body: unknown,
 ) => Promise<TResponse | undefined>;
 let watermarkStoreForTests: typeof import('./plugin').__watermarkStoreForTests;
+let providerConfigStoreForTests: typeof import('./plugin').__providerConfigStoreForTests;
 const registeredHooks: Record<string, (payload: unknown) => void | Promise<void>> = {};
 
 const makeHttp = () => ({
@@ -34,7 +34,6 @@ beforeAll(async () => {
     registeredHooks[hook] = handler;
   });
   logDebugMock = vi.fn();
-  getConfigMock = vi.fn().mockResolvedValue(null);
   loadSyncedDataMock = vi.fn().mockResolvedValue(null);
   persistDataSyncedMock = vi.fn().mockResolvedValue(undefined);
   showSnackMock = vi.fn();
@@ -47,7 +46,6 @@ beforeAll(async () => {
     startOAuthFlow: vi.fn(),
     getOAuthToken: getOAuthTokenMock,
     request: requestMock,
-    getConfig: getConfigMock,
     loadSyncedData: loadSyncedDataMock,
     persistDataSynced: persistDataSyncedMock,
     showSnack: showSnackMock,
@@ -61,6 +59,7 @@ beforeAll(async () => {
   clearTodolistCacheForTests = pluginModule.__clearTodolistCacheForTests;
   postAuthenticatedJsonForTests = pluginModule.__postAuthenticatedJsonForTests;
   watermarkStoreForTests = pluginModule.__watermarkStoreForTests;
+  providerConfigStoreForTests = pluginModule.__providerConfigStoreForTests;
 });
 
 afterEach(() => {
@@ -73,8 +72,6 @@ describe('Basecamp Issue Provider Plugin', () => {
     getOAuthTokenMock.mockResolvedValue('mock-token');
     requestMock.mockReset();
     logDebugMock.mockReset();
-    getConfigMock.mockReset();
-    getConfigMock.mockResolvedValue(null);
     loadSyncedDataMock.mockReset();
     loadSyncedDataMock.mockResolvedValue(null);
     persistDataSyncedMock.mockReset();
@@ -82,6 +79,7 @@ describe('Basecamp Issue Provider Plugin', () => {
     showSnackMock.mockReset();
     clearTodolistCacheForTests();
     watermarkStoreForTests.clear();
+    providerConfigStoreForTests.clear();
   });
 
   describe('time tracking hook registration', () => {
@@ -114,7 +112,7 @@ describe('Basecamp Issue Provider Plugin', () => {
     });
 
     it('triggers time push for stop events when timeTracking is onStop', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'onStop' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'onStop' });
       requestMock.mockResolvedValue({ ok: true });
 
       await registeredHooks.currentTaskChange({
@@ -122,6 +120,13 @@ describe('Basecamp Issue Provider Plugin', () => {
         current: null,
       });
 
+      expect(requestMock).toHaveBeenCalledWith(
+        'https://3.basecampapi.com/acc-123/recordings/101/timesheet/entries.json',
+        expect.objectContaining({
+          method: 'POST',
+          body: { date: '2026-07-01', hours: '1.00' },
+        }),
+      );
       expect(logDebugMock).toHaveBeenCalledWith(
         '[basecamp-issue-provider] Time pushed successfully',
         expect.objectContaining({
@@ -135,7 +140,7 @@ describe('Basecamp Issue Provider Plugin', () => {
     });
 
     it('triggers time push for done events when timeTracking is onDone', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'onDone' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'onDone' });
       requestMock.mockResolvedValue({ ok: true });
 
       await registeredHooks.taskComplete({
@@ -143,6 +148,13 @@ describe('Basecamp Issue Provider Plugin', () => {
         task: makeTask({ isDone: true }),
       });
 
+      expect(requestMock).toHaveBeenCalledWith(
+        'https://3.basecampapi.com/acc-123/recordings/101/timesheet/entries.json',
+        expect.objectContaining({
+          method: 'POST',
+          body: { date: '2026-07-01', hours: '1.00' },
+        }),
+      );
       expect(logDebugMock).toHaveBeenCalledWith(
         '[basecamp-issue-provider] Time pushed successfully',
         expect.objectContaining({
@@ -156,7 +168,7 @@ describe('Basecamp Issue Provider Plugin', () => {
     });
 
     it('triggers time push for both stop and done events when timeTracking is both', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
       requestMock.mockResolvedValue({ ok: true });
 
       await registeredHooks.currentTaskChange({
@@ -179,7 +191,7 @@ describe('Basecamp Issue Provider Plugin', () => {
     });
 
     it('skips time push when timeTracking is off', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'off' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'off' });
       requestMock.mockResolvedValue({ ok: true });
 
       await registeredHooks.currentTaskChange({
@@ -195,8 +207,8 @@ describe('Basecamp Issue Provider Plugin', () => {
       expect(requestMock).not.toHaveBeenCalled();
     });
 
-    it('skips time push when timeTracking is undefined', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123' });
+    it('skips time push when timeTracking is undefined in cached config', async () => {
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123' }); // no timeTracking
       requestMock.mockResolvedValue({ ok: true });
 
       await registeredHooks.currentTaskChange({
@@ -212,8 +224,8 @@ describe('Basecamp Issue Provider Plugin', () => {
       expect(requestMock).not.toHaveBeenCalled();
     });
 
-    it('skips time push when getConfig returns null', async () => {
-      getConfigMock.mockResolvedValue(null);
+    it('skips time push when no cached provider config for the todo', async () => {
+      // Do NOT set provider config for this todo
       requestMock.mockResolvedValue({ ok: true });
 
       await registeredHooks.currentTaskChange({
@@ -230,7 +242,7 @@ describe('Basecamp Issue Provider Plugin', () => {
     });
 
     it('does not allow done trigger when mode is onStop', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'onStop' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'onStop' });
       requestMock.mockResolvedValue({ ok: true });
 
       await registeredHooks.taskComplete({
@@ -243,7 +255,7 @@ describe('Basecamp Issue Provider Plugin', () => {
     });
 
     it('does not allow stop trigger when mode is onDone', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'onDone' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'onDone' });
       requestMock.mockResolvedValue({ ok: true });
 
       await registeredHooks.currentTaskChange({
@@ -256,7 +268,7 @@ describe('Basecamp Issue Provider Plugin', () => {
     });
 
     it('ignores hook events for tasks from other issue providers', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
       requestMock.mockResolvedValue({ ok: true });
 
       await registeredHooks.currentTaskChange({
@@ -300,10 +312,10 @@ describe('Basecamp Issue Provider Plugin', () => {
       }) as Task;
 
     it('computes positive deltas from timeSpentOnDay minus watermark', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
       requestMock.mockResolvedValue({ ok: true });
-      
-      const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+
+      const key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
       watermarkStoreForTests.set(key, 1800000); // 30 min already pushed
 
       await registeredHooks.currentTaskChange({
@@ -321,8 +333,8 @@ describe('Basecamp Issue Provider Plugin', () => {
     });
 
     it('skips dates where tracked equals watermark (zero delta)', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
-      const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
+      const key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
       watermarkStoreForTests.set(key, 3600000);
 
       await registeredHooks.currentTaskChange({
@@ -335,8 +347,8 @@ describe('Basecamp Issue Provider Plugin', () => {
     });
 
     it('skips dates where tracked is less than watermark (negative delta)', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
-      const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
+      const key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
       watermarkStoreForTests.set(key, 7200000);
 
       await registeredHooks.currentTaskChange({
@@ -349,10 +361,10 @@ describe('Basecamp Issue Provider Plugin', () => {
     });
 
     it('returns only positive deltas across multiple dates', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
       requestMock.mockResolvedValue({ ok: true });
-      
-      const keyJul1 = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+
+      const keyJul1 = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
       watermarkStoreForTests.set(keyJul1, 3600000); // fully pushed
 
       await registeredHooks.currentTaskChange({
@@ -375,7 +387,7 @@ describe('Basecamp Issue Provider Plugin', () => {
     });
 
     it('returns empty deltas when timeSpentOnDay is undefined', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
 
       await registeredHooks.currentTaskChange({
         previous: makeTask({ timeSpentOnDay: undefined }),
@@ -387,7 +399,7 @@ describe('Basecamp Issue Provider Plugin', () => {
     });
 
     it('returns empty deltas when timeSpentOnDay is empty', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
 
       await registeredHooks.currentTaskChange({
         previous: makeTask({ timeSpentOnDay: {} }),
@@ -398,18 +410,21 @@ describe('Basecamp Issue Provider Plugin', () => {
       expect(requestMock).not.toHaveBeenCalled();
     });
 
-    it('scopes watermarks by issueProviderId so different configs do not collide', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
-      requestMock.mockResolvedValue({ ok: true });
-      
-      // Push watermark for provider-1 config
-      const keyP1 = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
-      watermarkStoreForTests.set(keyP1, 3600000);
+    it('scopes watermarks by accountId so different cached configs do not collide', async () => {
+      // Two different cached configs for same todo but different accountIds
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
 
-      // Same todoId but different provider config → no watermark → full delta
+      requestMock.mockResolvedValue({ ok: true });
+
+      // Push watermark for acc-123
+      const keyAcc123 = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
+      watermarkStoreForTests.set(keyAcc123, 3600000);
+
+      // Same todoId but different accountId via provider config update → no watermark for acc-456 → full delta
+      providerConfigStoreForTests.set('101', { accountId: 'acc-456', timeTracking: 'both' });
+
       await registeredHooks.currentTaskChange({
         previous: makeTask({
-          issueProviderId: 'provider-2',
           timeSpentOnDay: { '2026-07-01': 3600000 },
         }),
         current: null,
@@ -421,6 +436,11 @@ describe('Basecamp Issue Provider Plugin', () => {
           date: '2026-07-01',
           deltaMs: 3600000,
         }),
+      );
+      // Verify the POST used acc-456
+      expect(requestMock).toHaveBeenCalledWith(
+        'https://3.basecampapi.com/acc-456/recordings/101/timesheet/entries.json',
+        expect.anything(),
       );
     });
   });
@@ -445,7 +465,7 @@ describe('Basecamp Issue Provider Plugin', () => {
       }) as Task;
 
     it('POSTs positive deltas to the Basecamp timesheet API and updates the watermark', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
       requestMock.mockResolvedValue({ ok: true });
 
       await registeredHooks.currentTaskChange({
@@ -463,7 +483,7 @@ describe('Basecamp Issue Provider Plugin', () => {
       );
 
       // Verify watermark was updated
-      const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+      const key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
       expect(watermarkStoreForTests.get(key)).toBe(5400000);
       expect(persistDataSyncedMock).toHaveBeenCalledWith(
         expect.any(String),
@@ -472,7 +492,7 @@ describe('Basecamp Issue Provider Plugin', () => {
     });
 
     it('does not update the watermark if the POST fails', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
       requestMock.mockRejectedValue(new Error('Network Error'));
 
       await registeredHooks.currentTaskChange({
@@ -481,12 +501,12 @@ describe('Basecamp Issue Provider Plugin', () => {
       });
 
       // Watermark should remain undefined/0
-      const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+      const key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
       expect(watermarkStoreForTests.get(key)).toBeUndefined();
     });
 
     it('shows snackbar and updates watermark if POST fails with 403', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
       requestMock.mockRejectedValue(Object.assign(new Error(), { status: 403 }));
 
       await registeredHooks.currentTaskChange({
@@ -500,13 +520,13 @@ describe('Basecamp Issue Provider Plugin', () => {
         ico: 'error',
       });
       // Watermark should remain undefined/unchanged
-      const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+      const key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
       expect(watermarkStoreForTests.get(key)).toBeUndefined();
       expect(persistDataSyncedMock).not.toHaveBeenCalled();
     });
 
     it('shows snackbar and does not update watermark if POST fails with 404', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
       requestMock.mockRejectedValue(Object.assign(new Error(), { status: 404 }));
 
       await registeredHooks.currentTaskChange({
@@ -520,13 +540,13 @@ describe('Basecamp Issue Provider Plugin', () => {
         ico: 'error',
       });
       // Watermark should remain undefined/unchanged
-      const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+      const key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
       expect(watermarkStoreForTests.get(key)).toBeUndefined();
       expect(persistDataSyncedMock).not.toHaveBeenCalled();
     });
 
     it('shows snackbar and does not update watermark if POST fails with 422', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
       requestMock.mockRejectedValue(Object.assign(new Error(), { status: 422 }));
 
       await registeredHooks.currentTaskChange({
@@ -541,15 +561,15 @@ describe('Basecamp Issue Provider Plugin', () => {
       });
 
       // Watermark should remain undefined/unchanged
-      const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+      const key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
       expect(watermarkStoreForTests.get(key)).toBeUndefined();
-      
+
       // Data should not be persisted since the watermark didn't change
       expect(persistDataSyncedMock).not.toHaveBeenCalled();
     });
 
     it('shows snackbar and does not update watermark if POST fails with 429', async () => {
-      getConfigMock.mockResolvedValue({ accountId: 'acc-123', timeTracking: 'both' });
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
       requestMock.mockRejectedValue(Object.assign(new Error(), { status: 429 }));
 
       await registeredHooks.currentTaskChange({
@@ -564,15 +584,16 @@ describe('Basecamp Issue Provider Plugin', () => {
       });
 
       // Watermark should remain undefined/unchanged
-      const key = watermarkStoreForTests.getKey('provider-1', '101', '2026-07-01');
+      const key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
       expect(watermarkStoreForTests.get(key)).toBeUndefined();
-      
+
       // Data should not be persisted since the watermark didn't change
       expect(persistDataSyncedMock).not.toHaveBeenCalled();
     });
 
-    it('skips push if accountId is missing', async () => {
-      getConfigMock.mockResolvedValue({ timeTracking: 'both' }); // No accountId
+    it('skips push if accountId is missing in cached config', async () => {
+      // Set a config with no accountId (empty string or missing)
+      providerConfigStoreForTests.set('101', { accountId: '', timeTracking: 'both' });
 
       await registeredHooks.currentTaskChange({
         previous: makeTask(),
@@ -580,6 +601,65 @@ describe('Basecamp Issue Provider Plugin', () => {
       });
 
       expect(requestMock).not.toHaveBeenCalled();
+    });
+
+    it('does not POST if postedHours < 0.01 (rounding granularity) and leaves watermark unchanged', async () => {
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
+      requestMock.mockResolvedValue({ ok: true });
+
+      const task = makeTask({
+        timeSpentOnDay: { '2026-07-01': 30000 }, // 30s = 0.00833h < 0.01h
+      });
+
+      await registeredHooks.currentTaskChange({
+        previous: task,
+        current: null,
+      });
+
+      // Should NOT call POST since postedHours < 0.01
+      expect(requestMock).not.toHaveBeenCalled();
+      // Watermark should NOT be advanced
+      const key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
+      expect(watermarkStoreForTests.get(key)).toBeUndefined();
+      expect(persistDataSyncedMock).not.toHaveBeenCalled();
+    });
+
+    it('accumulates time across calls until postedHours >= 0.01 (rollover test)', async () => {
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
+      requestMock.mockResolvedValue({ ok: true });
+
+      // First call: 18000ms (5s < 0.01h). Watermark unchanged, no POST.
+      await registeredHooks.currentTaskChange({
+        previous: makeTask({
+          timeSpentOnDay: { '2026-07-01': 18000 },
+        }),
+        current: null,
+      });
+
+      expect(requestMock).not.toHaveBeenCalled();
+      let key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
+      expect(watermarkStoreForTests.get(key)).toBeUndefined();
+
+      // Second call: 36000ms (10s accumulated from prior time = exactly 0.01h). Should POST.
+      // Note: Fresh watermark load needed, simulating async persistence flow
+      await registeredHooks.currentTaskChange({
+        previous: makeTask({
+          timeSpentOnDay: { '2026-07-01': 36000 }, // 10s = 0.01h exactly
+        }),
+        current: null,
+      });
+
+      expect(requestMock).toHaveBeenCalledWith(
+        'https://3.basecampapi.com/acc-123/recordings/101/timesheet/entries.json',
+        expect.objectContaining({
+          method: 'POST',
+          body: { date: '2026-07-01', hours: '0.01' },
+        }),
+      );
+
+      // Watermark should be advanced by 36000ms (the posted amount)
+      key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
+      expect(watermarkStoreForTests.get(key)).toBe(36000);
     });
   });
 

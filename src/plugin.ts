@@ -18,7 +18,6 @@ declare const PluginAPI: {
   startOAuthFlow(config: OAuthFlowConfig): Promise<unknown>;
   getOAuthToken(): Promise<string | null>;
   request<T = unknown>(url: string, options?: PluginRequestOptions): Promise<T>;
-  getConfig<T = Record<string, unknown>>(): Promise<T | null>;
   loadSyncedData(key?: string): Promise<string | null>;
   persistDataSynced(dataStr: string, key?: string): Promise<void>;
   onReady?(fn: () => void | Promise<void>): void;
@@ -40,6 +39,7 @@ const BASECAMP_ISSUE_PROVIDER_KEY = 'plugin:basecamp-issue-provider';
 const HOOK_CURRENT_TASK_CHANGE = 'currentTaskChange';
 const HOOK_TASK_COMPLETE = 'taskComplete';
 const WATERMARK_STORAGE_KEY = 'basecamp_time_watermarks';
+const PROVIDER_CONFIG_STORAGE_KEY = 'basecamp_provider_config_by_todo';
 const HOOK_PERSISTED_DATA_CHANGED = 'persistedDataChanged';
 // Public OAuth client metadata, injected at build time via esbuild `define` from the
 // BASECAMP_CLIENT_ID / BASECAMP_CLIENT_SECRET build env (see scripts/build.js). Falls back to
@@ -122,7 +122,7 @@ interface TimeDelta {
   deltaMs: number;
 }
 
-// In-memory watermark store. Key: `${issueProviderId}:${todoId}:${date}` → pushed milliseconds.
+// In-memory watermark store. Key: `${accountId}:${todoId}:${date}` → pushed milliseconds.
 // Task 3.3 will persist this to plugin-managed synced storage.
 const watermarkStore = new Map<string, number>();
 
@@ -152,19 +152,85 @@ const saveWatermarks = async (): Promise<void> => {
   }
 };
 
-const getWatermarkKey = (issueProviderId: string, todoId: string, date: string): string =>
-  `${issueProviderId}:${todoId}:${date}`;
+// In-memory provider config cache. Key: todoId → { accountId, timeTracking? }
+interface ProviderConfigCacheEntry {
+  accountId: string;
+  timeTracking?: BasecampTimeTrackingMode;
+}
+
+const providerConfigStore = new Map<string, ProviderConfigCacheEntry>();
+
+let isProviderConfigLoaded = false;
+
+const loadProviderConfigStore = async (): Promise<void> => {
+  try {
+    const dataStr = await PluginAPI.loadSyncedData(PROVIDER_CONFIG_STORAGE_KEY);
+    if (dataStr) {
+      const data = JSON.parse(dataStr) as Record<
+        string,
+        { accountId: string; timeTracking?: string }
+      >;
+      providerConfigStore.clear();
+      for (const [k, v] of Object.entries(data)) {
+        providerConfigStore.set(k, {
+          accountId: v.accountId,
+          timeTracking: v.timeTracking as BasecampTimeTrackingMode | undefined,
+        });
+      }
+    }
+  } catch (error) {
+    PluginAPI.log?.debug?.(
+      '[basecamp-issue-provider] Failed to load provider config store',
+      error,
+    );
+  }
+};
+
+const saveProviderConfigStore = async (): Promise<void> => {
+  try {
+    const data: Record<string, { accountId: string; timeTracking?: string }> =
+      Object.fromEntries(providerConfigStore.entries());
+    await PluginAPI.persistDataSynced(JSON.stringify(data), PROVIDER_CONFIG_STORAGE_KEY);
+  } catch (error) {
+    PluginAPI.log?.debug?.(
+      '[basecamp-issue-provider] Failed to save provider config store',
+      error,
+    );
+  }
+};
+
+const rememberProviderConfig = (
+  todoId: string,
+  config: Record<string, unknown>,
+): boolean => {
+  const accountId = String(config['accountId'] || '').trim();
+  if (!accountId) {
+    return false; // nothing to remember
+  }
+  const timeTracking = config['timeTracking'] as BasecampTimeTrackingMode | undefined;
+
+  const existing = providerConfigStore.get(todoId);
+  if (existing && existing.accountId === accountId && existing.timeTracking === timeTracking) {
+    return false; // no change
+  }
+
+  providerConfigStore.set(todoId, { accountId, timeTracking });
+  return true;
+};
+
+const getWatermarkKey = (accountId: string, todoId: string, date: string): string =>
+  `${accountId}:${todoId}:${date}`;
 
 const computePositiveDeltas = (
   timeSpentOnDay: Record<string, number> | undefined,
-  issueProviderId: string,
+  accountId: string,
   todoId: string,
 ): TimeDelta[] => {
   if (!timeSpentOnDay) return [];
 
   const deltas: TimeDelta[] = [];
   for (const [date, trackedMs] of Object.entries(timeSpentOnDay)) {
-    const key = getWatermarkKey(issueProviderId, todoId, date);
+    const key = getWatermarkKey(accountId, todoId, date);
     const pushedMs = watermarkStore.get(key) ?? 0;
     const deltaMs = trackedMs - pushedMs;
     if (deltaMs > 0) {
@@ -256,12 +322,17 @@ const handleBasecampTimeTrackingTrigger = async (
     isWatermarksLoaded = true;
   }
 
+  if (!isProviderConfigLoaded) {
+    await loadProviderConfigStore();
+    isProviderConfigLoaded = true;
+  }
+
   if (!isBasecampLinkedTask(task)) {
     return;
   }
 
-  const config = await PluginAPI.getConfig<BasecampPluginConfig>();
-  const mode = config?.timeTracking;
+  const providerCfg = providerConfigStore.get(task.issueId ?? '');
+  const mode = providerCfg?.timeTracking;
 
   if (!isTriggerAllowed(trigger, mode)) {
     return;
@@ -269,7 +340,7 @@ const handleBasecampTimeTrackingTrigger = async (
 
   const deltas = computePositiveDeltas(
     task.timeSpentOnDay,
-    task.issueProviderId ?? '',
+    providerCfg?.accountId ?? '',
     task.issueId ?? '',
   );
 
@@ -277,15 +348,24 @@ const handleBasecampTimeTrackingTrigger = async (
     return;
   }
 
-  if (!config.accountId) {
-    PluginAPI.log?.debug?.('[basecamp-issue-provider] Skipping time push: no accountId');
+  if (!providerCfg?.accountId) {
+    PluginAPI.log?.debug?.(
+      '[basecamp-issue-provider] Skipping time push: no cached provider config/accountId for todo',
+      { issueId: task.issueId },
+    );
     return;
   }
 
   for (const { date, deltaMs } of deltas) {
-    const hours = (deltaMs / 3600000).toFixed(2);
+    // Floor to Basecamp's 0.01h granularity
+    const postedHours = Math.floor((deltaMs / 3600000) * 100) / 100;
+    if (postedHours < 0.01) {
+      continue; // not enough to post yet; leave watermark so it accumulates for the next event
+    }
+
+    const hours = postedHours.toFixed(2);
     const url = getAccountScopedUrl(
-      config.accountId,
+      providerCfg.accountId,
       `/recordings/${task.issueId}/timesheet/entries.json`,
     );
 
@@ -293,9 +373,11 @@ const handleBasecampTimeTrackingTrigger = async (
       await postAuthenticatedJson(url, { date, hours });
 
       // Only update watermark after successful POST (which implies 201 Created from Basecamp)
-      const key = getWatermarkKey(task.issueProviderId ?? '', task.issueId ?? '', date);
+      // Advance watermark by the POSTED amount, not the raw delta
+      const postedMs = Math.round(postedHours * 3600000);
+      const key = getWatermarkKey(providerCfg.accountId, task.issueId ?? '', date);
       const pushedMs = watermarkStore.get(key) ?? 0;
-      watermarkStore.set(key, pushedMs + deltaMs);
+      watermarkStore.set(key, pushedMs + postedMs);
       await saveWatermarks();
 
       PluginAPI.log?.debug?.('[basecamp-issue-provider] Time pushed successfully', {
@@ -313,13 +395,16 @@ const handleBasecampTimeTrackingTrigger = async (
           type: 'ERROR',
           ico: 'error',
         });
-        
-        PluginAPI.log?.debug?.('[basecamp-issue-provider] Timesheet unavailable (403/404). Leaving watermark unchanged.', {
-          taskId: task.id,
-          issueId: task.issueId,
-          date,
-          status: reqError.status,
-        });
+
+        PluginAPI.log?.debug?.(
+          '[basecamp-issue-provider] Timesheet unavailable (403/404). Leaving watermark unchanged.',
+          {
+            taskId: task.id,
+            issueId: task.issueId,
+            date,
+            status: reqError.status,
+          },
+        );
         continue;
       } else if (reqError.status === 422) {
         PluginAPI.showSnack?.({
@@ -327,14 +412,17 @@ const handleBasecampTimeTrackingTrigger = async (
           type: 'ERROR',
           ico: 'error',
         });
-        
-        PluginAPI.log?.debug?.('[basecamp-issue-provider] Timesheet validation failed, dropping time', {
-          taskId: task.id,
-          issueId: task.issueId,
-          date,
-          status: reqError.status,
-        });
-        
+
+        PluginAPI.log?.debug?.(
+          '[basecamp-issue-provider] Timesheet validation failed, dropping time',
+          {
+            taskId: task.id,
+            issueId: task.issueId,
+            date,
+            status: reqError.status,
+          },
+        );
+
         // Do NOT advance the watermark so the delta is preserved and retried later.
         continue;
       } else if (reqError.status === 429) {
@@ -343,18 +431,21 @@ const handleBasecampTimeTrackingTrigger = async (
           type: 'ERROR',
           ico: 'error',
         });
-        
-        PluginAPI.log?.debug?.('[basecamp-issue-provider] Request rate limited by Basecamp, dropping time for now', {
-          taskId: task.id,
-          issueId: task.issueId,
-          date,
-          status: reqError.status,
-        });
-        
+
+        PluginAPI.log?.debug?.(
+          '[basecamp-issue-provider] Request rate limited by Basecamp, dropping time for now',
+          {
+            taskId: task.id,
+            issueId: task.issueId,
+            date,
+            status: reqError.status,
+          },
+        );
+
         // Do NOT advance the watermark so the delta is preserved and retried later.
         continue;
       }
-      
+
       // Task 4.x will implement proper failure handling (notifications, etc).
       PluginAPI.log?.debug?.('[basecamp-issue-provider] Time push failed', {
         taskId: task.id,
@@ -369,11 +460,15 @@ const handleBasecampTimeTrackingTrigger = async (
 PluginAPI.onReady?.(async () => {
   await loadWatermarks();
   isWatermarksLoaded = true;
+  await loadProviderConfigStore();
+  isProviderConfigLoaded = true;
 });
 
 PluginAPI.registerHook(HOOK_PERSISTED_DATA_CHANGED, async () => {
   await loadWatermarks();
   isWatermarksLoaded = true;
+  await loadProviderConfigStore();
+  isProviderConfigLoaded = true;
 });
 
 PluginAPI.registerHook(HOOK_CURRENT_TASK_CHANGE, (payload: unknown) => {
@@ -708,7 +803,15 @@ PluginAPI.registerIssueProvider({
     http: PluginHttp,
   ): Promise<PluginSearchResult[]> {
     const todos = await loadConfiguredTodolistTodos(config, http);
-    return filterTodosForSearch(todos, searchTerm).map(mapTodoToSearchResult);
+    const results = filterTodosForSearch(todos, searchTerm).map(mapTodoToSearchResult);
+
+    let changed = false;
+    for (const r of results) {
+      if (rememberProviderConfig(r.id, config)) changed = true;
+    }
+    if (changed) await saveProviderConfigStore();
+
+    return results;
   },
 
   async getNewIssuesForBacklog(
@@ -716,7 +819,15 @@ PluginAPI.registerIssueProvider({
     http: PluginHttp,
   ): Promise<PluginSearchResult[]> {
     const todos = await loadConfiguredTodolistTodos(config, http);
-    return todos.map(mapTodoToSearchResult);
+    const results = todos.map(mapTodoToSearchResult);
+
+    let changed = false;
+    for (const r of results) {
+      if (rememberProviderConfig(r.id, config)) changed = true;
+    }
+    if (changed) await saveProviderConfigStore();
+
+    return results;
   },
 
   async getById(issueId: string, config: Record<string, unknown>, http: PluginHttp) {
@@ -725,6 +836,10 @@ PluginAPI.registerIssueProvider({
     const todo = await http.get<BasecampTodo>(
       getAccountScopedUrl(accountId, `/todos/${issueId}.json`),
     );
+
+    if (rememberProviderConfig(issueId, config)) {
+      await saveProviderConfigStore();
+    }
 
     const lastUpdatedSource = todo.updated_at || todo.created_at;
     return {
@@ -825,9 +940,32 @@ export const __watermarkStoreForTests = {
     }
     throw new Error('Test helper unavailable outside test mode');
   },
-  getKey: (issueProviderId: string, todoId: string, date: string): string => {
+  getKey: (accountId: string, todoId: string, date: string): string => {
     if (typeof __TEST__ !== 'undefined' && __TEST__) {
-      return getWatermarkKey(issueProviderId, todoId, date);
+      return getWatermarkKey(accountId, todoId, date);
+    }
+    throw new Error('Test helper unavailable outside test mode');
+  },
+};
+
+export const __providerConfigStoreForTests = {
+  get: (todoId: string): ProviderConfigCacheEntry | undefined => {
+    if (typeof __TEST__ !== 'undefined' && __TEST__) {
+      return providerConfigStore.get(todoId);
+    }
+    throw new Error('Test helper unavailable outside test mode');
+  },
+  set: (todoId: string, config: ProviderConfigCacheEntry): void => {
+    if (typeof __TEST__ !== 'undefined' && __TEST__) {
+      providerConfigStore.set(todoId, config);
+      return;
+    }
+    throw new Error('Test helper unavailable outside test mode');
+  },
+  clear: (): void => {
+    if (typeof __TEST__ !== 'undefined' && __TEST__) {
+      providerConfigStore.clear();
+      return;
     }
     throw new Error('Test helper unavailable outside test mode');
   },
