@@ -661,6 +661,29 @@ describe('Basecamp Issue Provider Plugin', () => {
       key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
       expect(watermarkStoreForTests.get(key)).toBe(36000);
     });
+
+    it('shows snackbar and does not update watermark if POST fails with 503', async () => {
+      providerConfigStoreForTests.set('101', { accountId: 'acc-123', timeTracking: 'both' });
+      requestMock.mockRejectedValue(Object.assign(new Error(), { status: 503 }));
+
+      await registeredHooks.currentTaskChange({
+        previous: makeTask(),
+        current: null,
+      });
+
+      expect(showSnackMock).toHaveBeenCalledWith({
+        msg: 'ERRORS.RATE_LIMITED',
+        type: 'ERROR',
+        ico: 'error',
+      });
+
+      // Watermark should remain undefined/unchanged
+      const key = watermarkStoreForTests.getKey('acc-123', '101', '2026-07-01');
+      expect(watermarkStoreForTests.get(key)).toBeUndefined();
+
+      // Data should not be persisted since the watermark didn't change
+      expect(persistDataSyncedMock).not.toHaveBeenCalled();
+    });
   });
 
   describe('OAuth config', () => {

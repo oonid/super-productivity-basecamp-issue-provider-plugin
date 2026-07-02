@@ -425,7 +425,7 @@ const handleBasecampTimeTrackingTrigger = async (
 
         // Do NOT advance the watermark so the delta is preserved and retried later.
         continue;
-      } else if (reqError.status === 429) {
+      } else if (reqError.status === 429 || reqError.status === 503) {
         PluginAPI.showSnack?.({
           msg: t('ERRORS.RATE_LIMITED'),
           type: 'ERROR',
