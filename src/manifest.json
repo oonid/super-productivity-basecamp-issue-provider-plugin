@@ -9,7 +9,8 @@
   "type": "issueProvider",
   "icon": "icon.svg",
   "iFrame": false,
-  "permissions": [],
+  "permissions": ["http"],
+  "allowedHosts": ["3.basecampapi.com"],
   "hooks": [
     "currentTaskChange",
     "taskComplete"
