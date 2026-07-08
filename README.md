@@ -7,21 +7,38 @@ chosen to-do list as tasks and keep their done-state in sync.
 > Install-from-ZIP community plugin — **not** bundled with Super Productivity, and not
 > reviewed or guaranteed by the Super Productivity team.
 
-## What it does (v0.1.0)
+## What it does
 
 | Capability                                                          | Status |
 | ------------------------------------------------------------------- | :----: |
 | Import Basecamp **To-dos** from a chosen to-do list as SP tasks     |   ✅   |
 | Two-way **done-state** sync (complete ↔ re-open)                    |   ✅   |
+| Two-way **due date** sync                                           |   ✅   |
+| Import **notes** — Basecamp description → SP Markdown                |   ✅   |
 | OAuth connect (desktop loopback); account → project → list pickers  |   ✅   |
 | Bring-your-own Basecamp OAuth app credentials                       |   ✅   |
+
+### Field sync
+
+| Field       | Direction        | Notes |
+| ----------- | ---------------- | ----- |
+| Done state  | **two-way**      | `completed` ↔ SP done |
+| Due date    | **two-way**      | Basecamp `due_on` ↔ SP due day (date only) |
+| Notes       | **import only**  | Basecamp description (rich-text HTML) is converted to **Markdown** on import (bold, italic, links, lists, quotes, headings; attachments become links). SP renders notes as Markdown, so formatting is preserved rather than flattened. |
+| Title       | import only      | Shown as the task title |
+
+> **Why notes are import-only:** Basecamp descriptions are rich HTML, SP notes are
+> Markdown. Importing HTML→Markdown is lossless enough, but writing Markdown back to
+> Basecamp would replace the original description and drop anything beyond the supported
+> subset (attachments, embeds) — so notes are deliberately not pushed back. Due-date
+> write-back is lossless (a date) and preserves the to-do's title.
 
 ### Scope & limitations
 
 - **To-dos only.** Other Basecamp tools — Card Table, Message Board, Docs & Files,
   Schedule — are not imported.
-- **Status only.** Only the done/undone state syncs. Comments, assignees, due dates,
-  descriptions and other to-do fields are not synced.
+- **These fields only.** Beyond the table above, other to-do fields (comments, assignees,
+  etc.) are not synced.
 - **No timesheet push yet.** Time tracked in Super Productivity is not written back to the
   Basecamp to-do's timesheet. (Built, but waiting on a host capability — see Roadmap.)
 - **Desktop (Electron) only** for connecting — the OAuth flow uses a loopback redirect.
@@ -32,7 +49,7 @@ chosen to-do list as tasks and keep their done-state in sync.
       to-do's timesheet. Implemented in the plugin already; blocked on the `PluginAPI.request`
       host capability ([super-productivity#8721](https://github.com/super-productivity/super-productivity/pull/8721))
       and ships once that lands in a released Super Productivity.
-- [ ] Sync more to-do fields (assignee, due date) — under consideration.
+- [ ] Sync more to-do fields (e.g. assignee) — under consideration.
 - [ ] Additional Basecamp tools (e.g. Card Table) — under consideration.
 
 ## Requirements
