@@ -1043,6 +1043,7 @@ describe('Basecamp Issue Provider Plugin', () => {
           url: 'https://3.basecamp.com/1234567/buckets/42/todos/101',
           status: 'active',
           description: 'Check the latest changes',
+          body: 'Check the latest changes',
           completed: false,
         },
       ]);
@@ -1064,6 +1065,7 @@ describe('Basecamp Issue Provider Plugin', () => {
           url: 'https://3.basecamp.com/1234567/buckets/42/todos/101',
           status: 'active',
           description: 'Quarterly planning',
+          body: 'Quarterly planning',
           completed: false,
         },
       ]);
@@ -1087,6 +1089,71 @@ describe('Basecamp Issue Provider Plugin', () => {
         completed: false,
         lastUpdated: new Date('2026-06-19T01:02:03Z').getTime(),
       });
+    });
+
+    it('imports Basecamp due_on as dueDay and keeps the raw description as body', async () => {
+      const http = makeHttp();
+      http.get.mockResolvedValueOnce(
+        makeTodo({
+          id: 444,
+          content: 'With due + notes',
+          description: '<div>line one<br>line two</div>',
+          due_on: '2026-07-15',
+        }),
+      );
+
+      const issue = await definition.getById('444', cfg, http as any);
+
+      expect(issue).toMatchObject({
+        id: '444',
+        body: '<div>line one<br>line two</div>',
+        dueDay: '2026-07-15',
+      });
+    });
+
+    it('surfaces dueDay on backlog search results when due_on is set', async () => {
+      const http = makeHttp();
+      http.get.mockResolvedValueOnce([makeTodo({ id: 555, due_on: '2026-08-01' })]);
+
+      const results = await definition.getNewIssuesForBacklog!(cfg, http as any);
+      expect(results[0]).toMatchObject({ id: '555', dueDay: '2026-08-01' });
+    });
+
+    it('maps notes import-only from the Basecamp description as Markdown', () => {
+      const m = definition.fieldMappings?.find((x) => x.taskField === 'notes');
+      expect(m).toMatchObject({ issueField: 'body', defaultDirection: 'pullOnly' });
+      const md = (html: string): unknown => m?.toTaskValue?.(html, { issueId: '1' } as any);
+
+      expect(md('<div>Review the <strong>PR</strong> &amp; <em>merge</em></div>')).toBe(
+        'Review the **PR** & *merge*',
+      );
+      expect(md('<a href="https://ex.com/x"><strong>link</strong></a>')).toBe(
+        '[**link**](https://ex.com/x)',
+      );
+      expect(md('<ul><li>one</li><li>two</li></ul>')).toBe('- one\n- two');
+      expect(md('<ol><li>a</li><li>b</li></ol>')).toBe('1. a\n2. b');
+      expect(md('<h1>Title</h1>')).toBe('# Title');
+      expect(md('<blockquote>quote me</blockquote>')).toBe('> quote me');
+      expect(md('<del>gone</del>')).toBe('~~gone~~');
+      expect(md('line1<br>line2')).toBe('line1\nline2');
+      expect(md('')).toBe('');
+    });
+
+    it('maps a Basecamp attachment figure to a Markdown link', () => {
+      const m = definition.fieldMappings?.find((x) => x.taskField === 'notes');
+      expect(
+        m?.toTaskValue?.(
+          '<figure data-trix-attachment><img src="https://f/x.png"><figcaption>diagram</figcaption></figure>',
+          { issueId: '1' } as any,
+        ),
+      ).toBe('[diagram](https://f/x.png)');
+    });
+
+    it('maps dueDay import-only from the Basecamp due date', () => {
+      const m = definition.fieldMappings?.find((x) => x.taskField === 'dueDay');
+      expect(m).toMatchObject({ issueField: 'dueDay', defaultDirection: 'pullOnly' });
+      expect(m?.toTaskValue?.('2026-07-15', { issueId: '1' } as any)).toBe('2026-07-15');
+      expect(m?.toTaskValue?.('', { issueId: '1' } as any)).toBeUndefined();
     });
 
     it('paginates backlog import until a short page', async () => {

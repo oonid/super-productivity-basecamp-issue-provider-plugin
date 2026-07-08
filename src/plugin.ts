@@ -88,6 +88,8 @@ interface BasecampTodo {
   content?: string;
   title?: string;
   description?: string | null;
+  // Basecamp todo due date, date-only ("YYYY-MM-DD") or null.
+  due_on?: string | null;
   completed?: boolean;
   app_url?: string;
   url?: string;
@@ -495,12 +497,102 @@ const todolistCache = new Map<string, CacheEntry>();
 const getCacheKey = (accountId: string, bucketId: string, todolistId: string): string =>
   `${accountId}:${bucketId}:${todolistId}`;
 
+// Basecamp `due_on` is date-only. Normalize to a plain `YYYY-MM-DD` day for SP `dueDay`;
+// never derive a time-of-day. Returns undefined when absent or malformed.
+export const toDueDay = (dueOn?: string | null): string | undefined => {
+  if (!dueOn) {
+    return undefined;
+  }
+  const day = String(dueOn).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : undefined;
+};
+
+const decodeEntities = (s: string): string =>
+  s
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/&amp;/gi, '&'); // last, so decoded text isn't re-decoded
+
+// Basecamp todo `description` is rich-text HTML (Trix). SP notes render as Markdown, so
+// convert the Trix subset to Markdown on import to preserve formatting (bold, italic,
+// links, lists, quotes, headings) instead of flattening to plain text. Best-effort and
+// string-based (no DOM dependency); pathological/deeply-nested HTML degrades gracefully.
+export const htmlToMarkdown = (html?: string | null): string => {
+  if (!html) {
+    return '';
+  }
+  let s = String(html);
+
+  // Attachments (Trix <figure> / Action Text): keep as a Markdown link when a URL is
+  // present, else keep the caption text, else drop.
+  s = s.replace(/<figure\b[^>]*>([\s\S]*?)<\/figure>/gi, (fig, inner) => {
+    const url = (fig.match(/(?:href|src|url)=["']([^"']+)["']/i) || [])[1];
+    const caption = (inner.match(/<figcaption[^>]*>([\s\S]*?)<\/figcaption>/i) || [])[1] || '';
+    const label = caption.replace(/<[^>]+>/g, '').trim() || 'attachment';
+    return url ? `[${label}](${url})` : caption ? label : '';
+  });
+  s = s.replace(/<action-text-attachment\b[^>]*>[\s\S]*?<\/action-text-attachment>/gi, '');
+
+  // Inline formatting (before block handling so nesting like <a><strong> works).
+  s = s.replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, x) => `**${x}**`);
+  s = s.replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, x) => `*${x}*`);
+  s = s.replace(/<(del|s|strike)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, x) => `~~${x}~~`);
+  s = s.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_m, x) => '`' + x + '`');
+  s = s.replace(
+    /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
+    (_m, href, x) => `[${x.trim()}](${href})`,
+  );
+
+  // Headings, lists, blockquote, code blocks.
+  s = s.replace(
+    /<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi,
+    (_m, lvl, x) => `\n${'#'.repeat(Number(lvl))} ${x.trim()}\n`,
+  );
+  s = s.replace(/<ul\b[^>]*>([\s\S]*?)<\/ul>/gi, (_m, inner) => {
+    const items = inner.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_x, it) => `- ${it.trim()}\n`);
+    return `\n${items}`;
+  });
+  s = s.replace(/<ol\b[^>]*>([\s\S]*?)<\/ol>/gi, (_m, inner) => {
+    let n = 0;
+    const items = inner.replace(
+      /<li\b[^>]*>([\s\S]*?)<\/li>/gi,
+      (_x, it) => `${++n}. ${it.trim()}\n`,
+    );
+    return `\n${items}`;
+  });
+  s = s.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_m, inner) => {
+    const text = inner.replace(/<[^>]+>/g, '').trim();
+    return `\n${text.split('\n').map((l: string) => `> ${l}`).join('\n')}\n`;
+  });
+  s = s.replace(
+    /<pre\b[^>]*>([\s\S]*?)<\/pre>/gi,
+    (_m, x) => `\n\`\`\`\n${x.replace(/<[^>]+>/g, '')}\n\`\`\`\n`,
+  );
+
+  // Remaining block/line breaks, then strip leftover tags.
+  s = s.replace(/<br\s*\/?\s*>/gi, '\n');
+  s = s.replace(/<\/(p|div|li|h[1-6]|blockquote|tr)\s*>/gi, '\n');
+  s = s.replace(/<[^>]+>/g, '');
+
+  s = decodeEntities(s);
+
+  return s
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+};
+
 const mapTodoToSearchResult = (todo: BasecampTodo): PluginSearchResult => ({
   id: String(todo.id),
   title: getTodoTitle(todo),
   url: todo.app_url || todo.url,
   status: getTodoStatus(todo),
   description: todo.description || undefined,
+  body: todo.description || undefined,
+  dueDay: toDueDay(todo.due_on),
   completed: !!todo.completed,
 });
 
@@ -855,6 +947,7 @@ PluginAPI.registerIssueProvider({
         getBasecampTodoLink(accountId, bucketId, String(todo.id)),
       state: getTodoStatus(todo),
       completed: !!todo.completed,
+      dueDay: toDueDay(todo.due_on),
       lastUpdated: lastUpdatedSource ? new Date(lastUpdatedSource).getTime() : undefined,
     };
   },
@@ -878,6 +971,23 @@ PluginAPI.registerIssueProvider({
       defaultDirection: 'both',
       toIssueValue: (taskValue: unknown): boolean => !!taskValue,
       toTaskValue: (issueValue: unknown): boolean => !!issueValue,
+    },
+    {
+      // Import-only: Basecamp description (Trix HTML) -> SP notes as Markdown, preserving
+      // formatting. SP edits are not pushed back (would overwrite Basecamp's rich text).
+      taskField: 'notes',
+      issueField: 'body',
+      defaultDirection: 'pullOnly',
+      toIssueValue: (v: unknown): string => String(v || ''),
+      toTaskValue: (v: unknown): string => htmlToMarkdown(String(v ?? '')),
+    },
+    {
+      // Import-only: Basecamp due_on (date) -> SP dueDay.
+      taskField: 'dueDay',
+      issueField: 'dueDay',
+      defaultDirection: 'pullOnly',
+      toIssueValue: (v: unknown): string | undefined => (v ? String(v) : undefined),
+      toTaskValue: (v: unknown): string | undefined => (v ? String(v) : undefined),
     },
   ] satisfies PluginFieldMapping[],
 
