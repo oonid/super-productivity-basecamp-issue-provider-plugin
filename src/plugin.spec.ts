@@ -1149,11 +1149,18 @@ describe('Basecamp Issue Provider Plugin', () => {
       ).toBe('[diagram](https://f/x.png)');
     });
 
-    it('maps dueDay import-only from the Basecamp due date', () => {
+    it('maps dueDay two-way with the Basecamp due date', () => {
       const m = definition.fieldMappings?.find((x) => x.taskField === 'dueDay');
-      expect(m).toMatchObject({ issueField: 'dueDay', defaultDirection: 'pullOnly' });
+      expect(m).toMatchObject({ issueField: 'dueDay', defaultDirection: 'both' });
       expect(m?.toTaskValue?.('2026-07-15', { issueId: '1' } as any)).toBe('2026-07-15');
       expect(m?.toTaskValue?.('', { issueId: '1' } as any)).toBeUndefined();
+      expect(m?.toIssueValue?.('2026-07-15', { issueId: '1' } as any)).toBe('2026-07-15');
+      expect(m?.toIssueValue?.('', { issueId: '1' } as any)).toBeUndefined();
+    });
+
+    it('keeps notes import-only (not written back to Basecamp)', () => {
+      const m = definition.fieldMappings?.find((x) => x.taskField === 'notes');
+      expect(m).toMatchObject({ defaultDirection: 'pullOnly' });
     });
 
     it('paginates backlog import until a short page', async () => {
@@ -1312,6 +1319,46 @@ describe('Basecamp Issue Provider Plugin', () => {
 
       expect(http.post).not.toHaveBeenCalled();
       expect(http.delete).not.toHaveBeenCalled();
+      expect(http.put).not.toHaveBeenCalled();
+    });
+
+    it('writes the due date back (fetches content first, then PUTs) — two-way', async () => {
+      const http = makeHttp();
+      http.get.mockResolvedValueOnce({ id: 101, content: 'Ship release' });
+      http.put.mockResolvedValue({});
+
+      await definition.updateIssue!('101', { dueDay: '2026-09-01' }, cfg, http as any);
+
+      expect(http.get).toHaveBeenCalledWith(
+        'https://3.basecampapi.com/1234567/todos/101.json',
+      );
+      expect(http.put).toHaveBeenCalledWith(
+        'https://3.basecampapi.com/1234567/todos/101.json',
+        { content: 'Ship release', due_on: '2026-09-01' },
+      );
+    });
+
+    it('clears the due date (due_on: null) when dueDay is empty', async () => {
+      const http = makeHttp();
+      http.get.mockResolvedValueOnce({ id: 101, content: 'Ship release' });
+      http.put.mockResolvedValue({});
+
+      await definition.updateIssue!('101', { dueDay: '' }, cfg, http as any);
+
+      expect(http.put).toHaveBeenCalledWith(
+        'https://3.basecampapi.com/1234567/todos/101.json',
+        { content: 'Ship release', due_on: null },
+      );
+    });
+
+    it('refuses to write due date when the todo content cannot be read (no title clobber)', async () => {
+      const http = makeHttp();
+      http.get.mockResolvedValueOnce({ id: 101 });
+
+      await expect(
+        definition.updateIssue!('101', { dueDay: '2026-09-01' }, cfg, http as any),
+      ).rejects.toThrow(/unable to read the todo content/);
+      expect(http.put).not.toHaveBeenCalled();
     });
   });
 

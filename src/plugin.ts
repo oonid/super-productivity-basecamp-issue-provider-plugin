@@ -289,6 +289,9 @@ const getBasecampTodoLink = (
 const getBasecampTodoCompletionUrl = (accountId: string, todoId: string): string =>
   getAccountScopedUrl(accountId, `/todos/${todoId}/completion.json`);
 
+const getBasecampTodoUrl = (accountId: string, todoId: string): string =>
+  getAccountScopedUrl(accountId, `/todos/${todoId}.json`);
+
 const getTodoTitle = (todo: BasecampTodo): string =>
   (todo.content || todo.title || '').trim() || `Todo ${todo.id}`;
 
@@ -551,19 +554,22 @@ export const htmlToMarkdown = (html?: string | null): string => {
     /<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi,
     (_m, lvl, x) => `\n${'#'.repeat(Number(lvl))} ${x.trim()}\n`,
   );
-  s = s.replace(/<ul\b[^>]*>([\s\S]*?)<\/ul>/gi, (_m, inner) => {
-    const items = inner.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_x, it) => `- ${it.trim()}\n`);
-    return `\n${items}`;
-  });
-  s = s.replace(/<ol\b[^>]*>([\s\S]*?)<\/ol>/gi, (_m, inner) => {
-    let n = 0;
+  s = s.replace(/<ul\b[^>]*>([\s\S]*?)<\/ul>/gi, (_m, inner: string) => {
     const items = inner.replace(
       /<li\b[^>]*>([\s\S]*?)<\/li>/gi,
-      (_x, it) => `${++n}. ${it.trim()}\n`,
+      (_x: string, it: string) => `- ${it.trim()}\n`,
     );
     return `\n${items}`;
   });
-  s = s.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_m, inner) => {
+  s = s.replace(/<ol\b[^>]*>([\s\S]*?)<\/ol>/gi, (_m, inner: string) => {
+    let n = 0;
+    const items = inner.replace(
+      /<li\b[^>]*>([\s\S]*?)<\/li>/gi,
+      (_x: string, it: string) => `${++n}. ${it.trim()}\n`,
+    );
+    return `\n${items}`;
+  });
+  s = s.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_m, inner: string) => {
     const text = inner.replace(/<[^>]+>/g, '').trim();
     return `\n${text.split('\n').map((l: string) => `> ${l}`).join('\n')}\n`;
   });
@@ -982,10 +988,10 @@ PluginAPI.registerIssueProvider({
       toTaskValue: (v: unknown): string => htmlToMarkdown(String(v ?? '')),
     },
     {
-      // Import-only: Basecamp due_on (date) -> SP dueDay.
+      // Two-way: Basecamp due_on (date) <-> SP dueDay. Write-back is lossless (date only).
       taskField: 'dueDay',
       issueField: 'dueDay',
-      defaultDirection: 'pullOnly',
+      defaultDirection: 'both',
       toIssueValue: (v: unknown): string | undefined => (v ? String(v) : undefined),
       toTaskValue: (v: unknown): string | undefined => (v ? String(v) : undefined),
     },
@@ -997,20 +1003,36 @@ PluginAPI.registerIssueProvider({
     config: Record<string, unknown>,
     http: PluginHttp,
   ): Promise<void> {
-    if (!Object.prototype.hasOwnProperty.call(changes, 'completed')) {
-      return;
-    }
-
     const accountId = getRequiredConfigValue(config, 'accountId');
-    const isCompleted = !!changes['completed'];
-    const completionUrl = getBasecampTodoCompletionUrl(accountId, id);
 
-    if (isCompleted) {
-      await http.post(completionUrl, {});
-      return;
+    // Done-state via the completion endpoint.
+    if (Object.prototype.hasOwnProperty.call(changes, 'completed')) {
+      const completionUrl = getBasecampTodoCompletionUrl(accountId, id);
+      if (changes['completed']) {
+        await http.post(completionUrl, {});
+      } else {
+        await http.delete(completionUrl);
+      }
     }
 
-    await http.delete(completionUrl);
+    // Due date write-back (two-way). notes are import-only and never sent. Basecamp's
+    // update-todo requires `content`, so read the current todo first and preserve its
+    // title; refuse to PUT if we can't read a content (avoids clobbering the title).
+    if (Object.prototype.hasOwnProperty.call(changes, 'dueDay')) {
+      const todoUrl = getBasecampTodoUrl(accountId, id);
+      const current = await http.get<BasecampTodo>(todoUrl);
+      const content = current?.content || current?.title;
+      if (!content) {
+        throw new Error(
+          'Basecamp: cannot write due date — unable to read the todo content to preserve its title.',
+        );
+      }
+      const dueDay = changes['dueDay'];
+      await http.put(todoUrl, {
+        content,
+        due_on: dueDay ? String(dueDay) : null,
+      });
+    }
   },
 });
 
