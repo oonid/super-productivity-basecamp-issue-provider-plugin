@@ -55,5 +55,6 @@ includes the host capabilities the plugin relies on:
   merged.
 - **`PluginAPI.request`** (needed for timesheet push) —
   [super-productivity#8721](https://github.com/super-productivity/super-productivity/pull/8721),
-  in review. Bump `minSupVersion` to the release that ships it when enabling timesheet
-  push, so older hosts fail fast with a clear message instead of a silent runtime error.
+  merged and released in Super Productivity v18.14.0. `minSupVersion` is therefore
+  `18.14.0`, so older hosts fail fast with a clear message instead of a silent runtime
+  error.

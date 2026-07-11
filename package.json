@@ -1,6 +1,6 @@
 {
   "name": "basecamp-issue-provider",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Basecamp To-dos issue provider plugin for Super Productivity",
   "license": "MIT",
   "scripts": {

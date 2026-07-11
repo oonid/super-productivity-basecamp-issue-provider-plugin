@@ -1,9 +1,9 @@
 {
   "id": "basecamp-issue-provider",
   "name": "Basecamp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "manifestVersion": 1,
-  "minSupVersion": "13.0.0",
+  "minSupVersion": "18.14.0",
   "description": "Basecamp issue provider plugin",
   "author": "Super Productivity",
   "type": "issueProvider",
