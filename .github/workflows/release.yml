@@ -75,13 +75,13 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             "${{ steps.package.outputs.asset }}" \
             --title "v${{ steps.version.outputs.version }}" \
-            --notes "Basecamp 3 **To-dos** issue provider — community plugin for Super Productivity (install-from-ZIP; not bundled, not reviewed by the SP team).
+            --notes "Basecamp **To-dos** issue provider — community plugin for Super Productivity (install-from-ZIP; not bundled, not reviewed by the SP team).
 
           **Install:** download the ZIP below, then in Super Productivity go to Settings → Plugins → install from ZIP, and enable it.
 
-          **Requires:** a Super Productivity version with the generic plugin OAuth host hooks (super-productivity#8546), and the desktop (Electron) app — the OAuth flow uses a loopback redirect.
+          **Requires:** Super Productivity v18.14.0 or newer. This release needs the generic plugin OAuth host hooks (super-productivity#8546) and guarded \`PluginAPI.request\` with \`http\` permission + exact \`allowedHosts\` (super-productivity#8721, released in v18.14.0). The desktop (Electron) app is required for the OAuth loopback redirect.
 
-          **Scope:** imports To-dos and two-way syncs done-state. Other Basecamp tools (Card Table, Message Board, …), non-status fields (comments, assignee, due date), and timesheet push are not included — see the README.
+          **Scope:** imports Basecamp To-dos, two-way syncs done-state and due date, imports notes as Markdown, and can push Super Productivity tracked time to Basecamp timesheet entries. Other Basecamp tools (Card Table, Message Board, …) and fields such as comments or assignees are not included — see the README.
 
           **Bring-your-own OAuth (recommended):** register a Launchpad app at https://launchpad.37signals.com/integrations (redirect URI \`http://127.0.0.1:8976/callback\`) and enter its client id / secret / redirect under the provider's advanced settings (desktop only)." \
             --verify-tag
