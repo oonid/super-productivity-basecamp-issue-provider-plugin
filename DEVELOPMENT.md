@@ -10,6 +10,7 @@ npm install
 npm run typecheck
 npm run test      # vitest
 npm run build     # esbuild -> dist/ (plugin.js, manifest.json, icon.svg, i18n/)
+npm run package   # build + Node-only zip writer -> basecamp-issue-provider.zip
 ```
 
 ## Plugin API types (vendored)
